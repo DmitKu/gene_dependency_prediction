@@ -1,0 +1,39 @@
+name: depmap_prediction
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  # Base Languages
+  - python=3.11.7
+  - r-base=4.4.2
+
+  # GPU Support (Crucial for Attention Networks)
+  - pytorch
+  - torchvision
+  - pytorch-cuda=12.1  # Matches modern NVIDIA drivers
+  
+  # Data Processing (Python)
+  - pandas
+  - numpy
+  - polars
+  - dask
+  - pyreadr
+  - h5py
+  - joblib
+
+  # Machine Learning & Stats
+  - scikit-learn
+  - scipy
+  - umap-learn
+
+  # Visualization
+  - matplotlib
+  - plotly
+
+  # R Ecosystem
+  - r-data.table
+  - r-dplyr
+  
+  - pip
