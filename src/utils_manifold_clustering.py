@@ -65,26 +65,35 @@ def load_correlations(cor_dir: Path, gene_set: set[str], n_jobs: int = 4) -> pd.
     log.info("Loaded %d rows after per-file filtering.", len(combined))
     return combined
 
-
 # ---------------------------------------------------------------------------
-# Wrangling
+# RNA and CRISPR gene selection
 # ---------------------------------------------------------------------------
 
-def filter_and_pivot(corr, gene_set, value_col="sperman"):
-    mask = corr["crispr_gene"].isin(gene_set) & corr["rna_gene"].isin(gene_set)
-    filtered = corr.loc[mask]
-    del corr
+def select_genes_by_variance(df, min_sd: float = 0.01) -> list[str]:
+    df = df.rename(columns={"Unnamed: 0": "ModelID"}).set_index("ModelID")
+    var_per_gene = df.std(axis=0, numeric_only=True)
+    return var_per_gene[var_per_gene >= min_sd].index.tolist()
 
-    wide = filtered.pivot(          # ← pivot not pivot_table
-        index="rna_gene",
-        columns="crispr_gene",
-        values=value_col,
-    )
+def select_active_inactive_genes(data_crispr,
+                                  activity_threshhold,
+                                  non_activity_threshhold):
+    data_crispr = data_crispr.rename(columns={"Unnamed: 0": "ModelID"})
+    data_crispr = data_crispr.set_index('ModelID')
 
-    keep = [g for g in wide.index if g not in _BAD_GENES]
-    wide = wide.loc[wide.index.isin(keep), wide.columns.isin(keep)]
-    log.info("Wide matrix: %s", wide.shape)
-    return wide
+    # Boolean masks
+    dependent_mask = data_crispr < activity_threshhold
+    nondependent_mask = data_crispr > non_activity_threshhold
+
+    # Count per gene
+    num_dependent = dependent_mask.sum(axis=0)
+    num_nondependent = nondependent_mask.sum(axis=0)
+
+    # Genes with at least 5 dependent AND 5 nondependent cell lines
+    eligible_genes = (num_dependent >= 5) & (num_nondependent >= 5)
+
+    # Extract list of eligible genes
+    eligible_gene_list = eligible_genes[eligible_genes].index.tolist()
+    return eligible_gene_list
 
 
 # ---------------------------------------------------------------------------
