@@ -31,13 +31,14 @@ sys.path.insert(0, str(_root / "src"))
 from utils_feature_engineering import (
     # Data loading
     load_cluster_info, load_rna, load_crispr,
-    sanity_check_data,
+    common_CellLine_alignment, sanity_check_data,
     # Cluster stats
     melt_rna_with_clusters, compute_loo_cluster_stats, build_cluster_sum_wide,
     # Split
     split_cell_lines, add_split_column, print_split_stats,
     # Transforms
     fit_quantile_transformer, apply_quantile_transformer,
+    quantile_transform_sel_cols, minmax_transform_sel_cols,
     sign_log1p, replace_inf_with_null, apply_log_transform,
     # Features
     create_features,
@@ -105,28 +106,37 @@ selected_rna_genes = data_gene_sel["rna_gene"]
 
 print("Loading cluster info, RNA, CRISPR …")
 cluster_info = load_cluster_info(CLUSTER_CSV)
-rna_wide     = load_rna(RNA_FILE,
-                        selected_rna_genes)
+rna_wide_CL     = load_rna(RNA_FILE,
+                               selected_rna_genes)
+rna_wide_GENE     = load_rna(RNA_FILE,
+                                  selected_crispr_genes)
 crispr_wide  = load_crispr(CRISPR_FILE,
                            selected_crispr_genes)
 
 
-sanity_check_data(rna_wide, selected_rna_genes, label="RNA")
+rna_wide_CL, rna_wide_GENE, crispr_wide = common_CellLine_alignment(df_rna_CL=rna_wide_CL,
+                                                  df_rna_GENE=rna_wide_GENE,
+                                                  df_crispr=crispr_wide)
+
+sanity_check_data(rna_wide_CL, selected_rna_genes, label="RNA")
 
 sanity_check_data(crispr_wide, selected_crispr_genes, label="CRISPR")
 
 
 # ── 3. Build RNA long table with cluster labels ───────────────────────────────
 
+common_genes = set(rna_wide_GENE.columns)&set(cluster_info['gene'])
 print("Melting RNA …")
-rna_lng = melt_rna_with_clusters(rna_wide, cluster_info)
-print(f"  RNA long shape: {rna_lng.shape}")
+rna_lng_GENE = melt_rna_with_clusters(rna_wide_GENE,
+                                      cluster_info,
+                                      common_genes)
+print(f"  RNA long shape: {rna_lng_GENE.shape}")
 
 
 # ── 4. Leave-one-out cluster statistics ───────────────────────────────────────
 
 print("Computing leave-one-out cluster statistics …")
-rna_lng = compute_loo_cluster_stats(rna_lng)
+rna_lng_GENE = compute_loo_cluster_stats(rna_lng_GENE)
 
 
 # ── 5. Melt CRISPR and join ───────────────────────────────────────────────────
@@ -136,29 +146,21 @@ crispr_lng = crispr_wide.unpivot(
     index="ModelID", variable_name="gene", value_name="CRISPR"
 )
 
-rna_short = rna_lng.select([
-    "ModelID", "gene", "RNA", "cluster",
-    "clust_sum_excl", "clust_N_excl",
-    "clust_mean_excl", "clust_sd_excl",
-    "clust_median_all", "clust_max_all", "clust_min_all",
-])
+crispr_lng = crispr_lng.drop_nulls(subset=["CRISPR"])
+
 
 data = (
-    rna_short
+    rna_lng_GENE
     .join(crispr_lng, on=["ModelID", "gene"], how="inner")
     .drop_nulls(["RNA", "CRISPR"])
 )
-
-valid_models  = set(data["ModelID"])
-rna_lng_valid = rna_lng.filter(pl.col("ModelID").is_in(valid_models))
-print(f"  Joined data shape: {data.shape}")
 
 
 # ── 6. Train / val / test split on cell lines ─────────────────────────────────
 
 print("\nSplitting cell lines into train / val / test …")
 train_cls, val_cls, test_cls = split_cell_lines(
-    model_ids=valid_models, val_frac=VAL_FRAC,
+    model_ids=crispr_wide['ModelID'].unique(), val_frac=VAL_FRAC,
     test_frac=TEST_FRAC, random_seed=RANDOM_SEED,
 )
 data = add_split_column(data, train_cls, val_cls)
@@ -180,55 +182,78 @@ data = create_features(data)
 
 # ── 9. sign_log1p transform ───────────────────────────────────────────────────
 
-data_out, log_cols = apply_log_transform(data)
-print(f"\nApplying sign_log1p to {len(log_cols)} columns:")
-for c in log_cols:
-    print(f"  {c}")
+data_out, log_cols = apply_log_transform(data = data, 
+                                         skip_cols= SKIP_LOG)
 
 
-# ── 10. Cluster-sum table ─────────────────────────────────────────────────────
+# ── 10. quantile transformation ───────────────────────────────────────────────────
+
+quantile_cols = [
+    'RNA', 'clust_sum_all', 'clust_N_all', 
+    'clust_mean_all','clust_var_all', 'clust_median_all',
+    'clust_max_all','clust_min_all', 'clust_sum_excl',
+    'clust_N_excl', 'clust_mean_excl', 'clust_sd_excl',
+    'clust_mean', 'clust_sd', 'clust_sum', 'clust_N',
+    'clust_median', 'clust_max', 'clust_min',
+    'gene_rank_in_clust','gene_vs_cluster_mean_ratio',
+    'z_score_glob','rank_value_glob','gene_fraction_of_cluster_total'
+    ]
+
+data_out = quantile_transform_sel_cols(data_out,
+                                   quantile_cols)
+
+# ── 11. minmax transformation ───────────────────────────────────────────────────
+
+minmax_cols = ['gene_percentile_in_cluster',
+                  'gene_z_score_in_clust'
+                  ]
+
+data_out = minmax_transform_sel_cols(data_out,
+                                     minmax_cols)
+
+# ── 12. Cluster-sum table ─────────────────────────────────────────────────────
 
 print("\nBuilding cluster-sum cell-line table …")
 split_map   = data_out.select(["ModelID", "split"]).unique("ModelID")
-cluster_out = build_cluster_sum_wide(rna_lng_valid, split_map)
 
-cluster_num_cols = [c for c in cluster_out.columns if c not in {"ModelID", "split"}]
-cluster_out = cluster_out.with_columns(
-    [sign_log1p(cluster_out[c]).alias(c) for c in cluster_num_cols]
-)
-cluster_out = replace_inf_with_null(cluster_out, cluster_num_cols)
+print("Melting RNA …")
+rna_wide_CL_melt = melt_rna_with_clusters(rna_wide_CL, cluster_info, selected_rna_genes)
+print(f"  RNA long shape: {rna_wide_CL.shape}")
 
-
-# ── 11. Null count report ─────────────────────────────────────────────────────
-
-null_gene    = data_out.null_count().sum_horizontal().sum()
-null_cluster = cluster_out.null_count().sum_horizontal().sum()
-print(f"\nNull counts (imputed with training medians in s4_build_hdf5.py):")
-print(f"  Gene feature table : {null_gene}")
-print(f"  Cell-line table    : {null_cluster}")
+cluster_out = build_cluster_sum_wide(rna_wide_CL_melt, split_map)
+cluster_out = cluster_out.drop("null")
 
 
-# ── 12. Save ──────────────────────────────────────────────────────────────────
+cluster_num_cols = [col for col in cluster_out.columns if col not in ['ModelID','split']]
+cluster_out = quantile_transform_sel_cols(cluster_out, cluster_num_cols)
+
+
+# ── 13. remove columns with many NULLs ─────────────────────────────────────────────────────
+
+null_columns = [
+    col for col in data_out.columns 
+    if data_out[col].null_count() > 0
+]
+
+data_out = data_out.drop(null_columns)
+
+# ── 14. Save ──────────────────────────────────────────────────────────────────
 
 print("\nSaving …")
-cluster_out.write_csv(OUT_CLUSTER)
+cluster_out.to_csv(OUT_CLUSTER, index=False)
 data_out.write_csv(OUT_MAIN)
 print(f"  → {OUT_CLUSTER}  {cluster_out.shape}")
 print(f"  → {OUT_MAIN}  {data_out.shape}")
 
 
-# ── 13. Column summary ────────────────────────────────────────────────────────
+# ── 15. summary ────────────────────────────────────────────────────────
 
 gene_feat_cols = [
     c for c in data_out.columns
     if c not in {"ModelID", "gene", "cluster", "CRISPR", "split"}
 ]
-print(f"\nGene feature columns ({len(gene_feat_cols)} total):")
-for c in gene_feat_cols:
-    tag = "[log]" if c in log_cols else "[raw]"
-    print(f"  {tag:6s}  {c}")
-
-print(f"\nCell-line cluster-sum columns: {len(cluster_num_cols)} [log]")
+print(f"\nGene feature columns:  {len(gene_feat_cols)} total")
+print(f"\nCell-line cluster-sum columns: {len(cluster_num_cols)}")
 print(f"\nOutputs:")
 print(f"  {OUT_MAIN.name}  ← includes 'split' column and transformed CRISPR")
 print(f"  {OUT_CLUSTER.name}  ← includes 'split' column")

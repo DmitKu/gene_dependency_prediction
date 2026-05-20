@@ -25,6 +25,9 @@ import numpy as np
 import pandas as pd
 import polars as pl
 from sklearn.preprocessing import QuantileTransformer
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import RobustScaler
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -52,9 +55,9 @@ def load_rna(rna_csv: Path,
              selected_genes: list) -> pl.DataFrame:
     """Load RNA expression wide table; renames the index column to 'ModelID'."""
     df = pl.read_csv(rna_csv).rename({"": "ModelID"})
-    df = df.select(['ModelID',*selected_genes])
+    common_gene = set(df.columns) & set(selected_genes)
+    df = df.select(['ModelID',*common_gene])
     return df
-
 
 def load_crispr(crispr_csv: Path,
                 selected_genes: list) -> pl.DataFrame:
@@ -65,8 +68,25 @@ def load_crispr(crispr_csv: Path,
     header_cols = pl.read_csv(crispr_csv, n_rows=0).columns
     rename_map  = {c: c.split("..")[0] for c in header_cols if ".." in c}
     df = pl.read_csv(crispr_csv).rename({"": "ModelID"}).rename(rename_map)
-    df = df.select(['ModelID',*selected_genes])
+    common_gene = set(df.columns) & set(selected_genes)
+    df = df.select(['ModelID',*common_gene])
     return df
+
+
+
+def common_CellLine_alignment(df_rna_CL: pl.DataFrame,
+                              df_rna_GENE: pl.DataFrame,
+                              df_crispr: pl.DataFrame) -> pl.DataFrames:
+    """remove uncommon cell lines
+       returns filtered RNA dataframe and filtered CRISPR dataframe
+    """
+    common_cell_lines = set(df_rna_CL['ModelID'])&set(df_rna_GENE['ModelID'])&set(df_crispr['ModelID'])
+    df_rna_CL = df_rna_CL.filter(pl.col("ModelID").is_in(common_cell_lines))
+    df_rna_GENE = df_rna_GENE.filter(pl.col("ModelID").is_in(common_cell_lines))
+    df_crispr = df_crispr.filter(pl.col("ModelID").is_in(common_cell_lines))
+ 
+    return df_rna_CL, df_rna_GENE, df_crispr
+
 
     
 def sanity_check_data(df_wide: pl.DataFrame, common_genes: list[str], label: str, n: int = 10) -> None:
@@ -97,9 +117,12 @@ def sanity_check_data(df_wide: pl.DataFrame, common_genes: list[str], label: str
 def melt_rna_with_clusters(
     rna_wide: pl.DataFrame,
     cluster_info: pl.DataFrame,
+    common_genes:list,
 ) -> pl.DataFrame:
     """Unpivot RNA from wide to long and attach cluster labels."""
     rna_lng = rna_wide.unpivot(index="ModelID", variable_name="gene", value_name="RNA")
+    rna_lng = rna_lng.filter(pl.col("gene").is_in(common_genes))
+
     return rna_lng.join(cluster_info, on="gene", how="left")
 
 
@@ -357,6 +380,71 @@ def sign_log1p(s: pl.Series) -> pl.Series:
     return s.sign() * (s.abs() + 1).log(base=math.e)
 
 
+def quantile_transform_sel_cols(df_wide: pl.DataFrame,
+                                minmax_cols: list):
+    # 1. Set up the ColumnTransformer
+    preprocessor = ColumnTransformer(
+        transformers=[
+            # Pass the entire list of columns here
+            ('quantile', QuantileTransformer(n_quantiles=1000,
+                                             output_distribution='normal',
+                                             random_state=42), minmax_cols)
+        ],
+        remainder='passthrough' # Leaves all other columns (like binary flags or raw scales) completely untouched
+    )
+
+    # 23. Ensure the output stays as a clean DataFrame with column names intact
+    preprocessor.set_output(transform="pandas")
+
+    # 3. Fit and transform your feature matrix
+    X_train_transformed = preprocessor.fit_transform(df_wide.to_pandas())
+    # 4. rename columns
+    X_train_transformed.columns = X_train_transformed.columns.str.replace('^.+__','',regex=True)
+    return X_train_transformed
+
+def minmax_transform_sel_cols(df_wide: pl.DataFrame,
+                                minmax_cols: list):
+    # 1. Set up the ColumnTransformer
+    preprocessor_minmax = ColumnTransformer(
+        transformers=[
+            ('minmax', MinMaxScaler(), minmax_cols)
+        ],
+        remainder='passthrough' # Leaves all your other features completely raw
+    )
+
+    # 23. Ensure the output stays as a clean DataFrame with column names intact
+    preprocessor_minmax.set_output(transform="pandas")
+
+    # 3. Fit and transform your feature matrix
+    X_train_transformed = preprocessor_minmax.fit_transform(df_wide)
+    # 4. rename columns
+    X_train_transformed.columns = X_train_transformed.columns.str.replace('^.+__','',regex=True)
+    X_train_transformed = pl.from_pandas(X_train_transformed)
+    return X_train_transformed
+
+
+
+def robust_transform_sel_cols(df_wide: pl.DataFrame, robust_cols: list) -> pl.DataFrame:
+    # 1. Set up the ColumnTransformer with RobustScaler
+    preprocessor_robust = ColumnTransformer(
+        transformers=[
+            ('robust', RobustScaler(), robust_cols)
+        ],
+        remainder='passthrough' # Leaves all your other features completely raw
+    )
+
+    # 2. Ensure the output stays as a clean Polars DataFrame natively
+    preprocessor_robust.set_output(transform="pandas")
+
+    # 3. Fit and transform your feature matrix
+    X_train_transformed = preprocessor_robust.fit_transform(df_wide)
+    # 4. rename columns
+    X_train_transformed.columns = X_train_transformed.columns.str.replace('^.+__','',regex=True)
+    X_train_transformed = pl.from_pandas(X_train_transformed)
+    
+    return X_train_transformed
+
+
 def replace_inf_with_null(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
     """Replace ±Inf with null in specified float columns."""
     exprs = []
@@ -381,8 +469,6 @@ def apply_log_transform(
     Apply sign_log1p to all numeric columns not in *skip_cols*.
     Returns the transformed DataFrame and the list of columns transformed.
     """
-    if skip_cols is None:
-        skip_cols = SKIP_LOG
 
     log_cols = [
         c for c in data.columns

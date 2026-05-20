@@ -57,6 +57,7 @@ BASE_PATH   = Path("C:/Users/dkuch/Documents/Blog_ideas_data/Computational/MOA_P
 RNA_FILE    = BASE_PATH/ "public_data/DepMap/Expression/Expression_Public_25Q3_subsetted.csv"
 CRISPR_FILE = BASE_PATH/ "public_data/DepMap/CRISPR/CRISPR_(DepMap_Public_25Q3+Score,_Chronos)_subsetted.csv"
 
+
 GENES_CSV  = Path(selected_genes_path)
 #SAVE_DIR   = Path(r"C:\Users\dkuch\Documents\Blog_ideas_data\Computational\MOA_Prediction_based_on_CETSA\20251122_Model_development\GitHub_GeneDependancy_prediction\outputs\clustering")
 
@@ -64,9 +65,9 @@ MIN_RNA_SD = 0.7
 N_JOBS             = 11
 PCA_COMPONENTS     = 200
 UMAP_NEIGHBORS     = 2
-UMAP_MIN_DIST      = 0.005
+UMAP_MIN_DIST      = 0.05
 UMAP_METRIC        = "euclidean"
-DBSCAN_EPS         = 0.005
+DBSCAN_EPS         = 0.05
 DBSCAN_MIN_SAMPLES = 1
 HIGHLIGHT_GENES    = ["MET", "EGFR", 'MYC', 'TP53']
 
@@ -114,7 +115,10 @@ with open(SAVE_DIR/"Selected_RNA_CRISPR.pkl", "wb") as f:
 
 
 selected_crispr_genes = set(selected_crispr_genes)
-selected_rna_genes = set(selected_rna_genes)
+
+#RNA genes has to inclode CRIPR genes as well in 
+#correlation matrix
+selected_rna_genes = set(selected_rna_genes) | set(selected_crispr_genes)
 
 
 corr = corr.loc[
