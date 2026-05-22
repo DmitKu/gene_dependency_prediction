@@ -58,3 +58,35 @@ By examining attention weights, you can identify which functional gene modules d
 📈 Results & Medium Blog
 A full breakdown of biological insights and model performance is available here:
 Medium Article
+
+
+```mermaid
+graph LR
+    subgraph "Input Layer"
+        GF[Gene Features] --> G_ENC(Gene Encoder)
+        CF[Cell Features] --> C_TOK(Cell Tokenizer)
+    end
+
+    subgraph "Biologically Grounded Attention"
+        G_ENC --> G_EMB[Gene Embedding]
+        C_TOK --> C_TOK_SEQ[Cell Token Sequence]
+        G_EMB -.->|Query| CA1(Cross-Attention 1)
+        C_TOK_SEQ -.->|K, V| CA1
+        CA1 --> CA2(Cross-Attention 2)
+        CA2 --> C_CTX[Refined Context]
+    end
+
+    subgraph "FiLM-Conditioned Trunk"
+        C_CTX --> MRG(Merge)
+        G_EMB --> COND(Conditioning)
+        MRG --> RES1(Residual Blocks)
+        COND -.-|FiLM Modulation| RES1
+    end
+
+    subgraph "Output"
+        RES1 --> HEAD(Head)
+        G_EMB -.-> BYP(Linear Bypass)
+        BYP --> ADD((+))
+        HEAD --> ADD
+        ADD --> OUT[Prediction]
+    end
