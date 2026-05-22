@@ -241,43 +241,33 @@ python scripts/s05_train_RNAbased_CRISPR_model.py
 
 ```mermaid
 graph TB
-    %% Nodes and Styling
-    classDef input fill:#f9f9f9,stroke:#333,stroke-width:2px;
-    classDef attention fill:#e1f5fe,stroke:#0277bd,stroke-width:2px;
-    classDef processing fill:#fff3e0,stroke:#ef6c00,stroke-width:2px;
-    classDef output fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px;
-
-    subgraph Inputs
-        GF[Gene Features]:::input
-        CF[Cell Features]:::input
+    subgraph Input_Layer [Input Layer]
+        GF[Gene Features] --> G_ENC(Gene Encoder)
+        CF[Cell Features] --> C_TOK(Cell Tokenizer)
     end
 
-    subgraph Attention_Mechanism ["Biologically Grounded Attention"]
-        G_ENC(Gene Encoder) --> G_EMB[Gene Embedding]
-        C_TOK(Cell Tokenizer) --> C_SEQ[Cell Token Sequence]
-        G_EMB --> CA1(Cross-Attention)
-        C_SEQ --> CA1
+    subgraph Attention [Biologically Grounded Attention]
+        G_ENC --> G_EMB[Gene Embedding]
+        C_TOK --> C_TOK_SEQ[Cell Token Sequence]
+        G_EMB -.->|Query| CA1(Cross-Attention)
+        C_TOK_SEQ -.->|K, V| CA1
         CA1 --> C_CTX[Refined Context]
-    end:::attention
+    end
 
-    subgraph Trunk ["FiLM-Conditioned Trunk"]
+    subgraph Trunk [FiLM-Conditioned Trunk]
         C_CTX --> MRG(Merge)
-        G_EMB --> COND(Conditioning FiLM)
-        MRG --> RES(Residual Blocks):::processing
-        COND -.->|Modulation| RES
+        G_EMB --> COND(Conditioning)
+        MRG --> RES1(Residual Blocks)
+        COND -.->|FiLM Modulation| RES1
     end
 
-    subgraph Prediction ["Output Layer"]
-        RES --> HEAD(Prediction Head)
-        G_EMB --> BYP(Linear Bypass)
-        HEAD --> ADD((+))
-        BYP --> ADD
-        ADD --> OUT[CRISPR Score Prediction]:::output
+    subgraph Output_Layer [Output]
+        RES1 --> HEAD(Prediction Head)
+        G_EMB -.-> BYP(Linear Bypass)
+        HEAD --> MERGE_OUT{Sum}
+        BYP --> MERGE_OUT
+        MERGE_OUT --> OUT[CRISPR Prediction]
     end
-
-    %% Flow adjustments
-    GF --> G_ENC
-    CF --> C_TOK
 ```
 
 The cross-attention mechanism allows the model to learn which gene clusters are most informative for predicting dependency in a given cell line, providing a biologically interpretable attention map alongside predictions.
