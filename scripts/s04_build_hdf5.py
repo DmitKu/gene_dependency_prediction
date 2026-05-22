@@ -9,12 +9,13 @@ call sequence.
 
 Usage
 -----
-    python s04_build_hdf5.py
+    python scripts/s04_build_hdf5.py
 
 Prerequisites
 -------------
-    s3_feature_engineering.py must have been run first so that both CSVs
-    contain a 'split' column and the CRISPR values are already
+    s03_feature_engineering.py must have been run first so that
+    feature data are available and both CSVs contain a 'split'
+    column and the CRISPR values are already
     QuantileTransformed.
 """
 
@@ -30,7 +31,7 @@ except NameError:                    # __file__ undefined in Spyder
     _root = Path.cwd()               # assumes Spyder cwd = project root
 sys.path.insert(0, str(_root / "src"))
 
-from hdf5_builder import (
+from utils_hdf5_builder import (
     load_csvs,
     identify_feature_columns,
     validate_model_ids,

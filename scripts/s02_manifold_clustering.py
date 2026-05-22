@@ -45,21 +45,11 @@ logging.basicConfig(
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
 
-#COR_DIR    = Path("data/cor_results")
-#GENES_CSV  = Path("data/selected_genes.csv")
-#RNA_FILE    = Path("data/Expression_Public_25Q3_subsetted.csv"
-#CRISPR_FILE = Path("data/CRISPR_(DepMap_Public_25Q3+Score,_Chronos)_subsetted.csv"
+COR_DIR    = Path("data/cor_results")
+GENES_CSV  = Path("data/selected_genes.csv")
+RNA_FILE    = Path("data/Expression_Public_25Q3_subsetted.csv")
+CRISPR_FILE = Path("data/CRISPR_(DepMap_Public_25Q3+Score,_Chronos)_subsetted.csv")
 
-
-COR_DIR    = Path(r'C:\Users\dkuch\Documents\Blog_ideas_data\Computational\MOA_Prediction_based_on_CETSA\Analysis_data\cor_results')
-selected_genes_path =  'C:/Users/dkuch/Documents/Blog_ideas_data/Computational/MOA_Prediction_based_on_CETSA/Analysis_data/Selected_genes_based_on_RNA_CRISPR.csv'
-BASE_PATH   = Path("C:/Users/dkuch/Documents/Blog_ideas_data/Computational/MOA_Prediction_based_on_CETSA")
-RNA_FILE    = BASE_PATH/ "public_data/DepMap/Expression/Expression_Public_25Q3_subsetted.csv"
-CRISPR_FILE = BASE_PATH/ "public_data/DepMap/CRISPR/CRISPR_(DepMap_Public_25Q3+Score,_Chronos)_subsetted.csv"
-
-
-GENES_CSV  = Path(selected_genes_path)
-#SAVE_DIR   = Path(r"C:\Users\dkuch\Documents\Blog_ideas_data\Computational\MOA_Prediction_based_on_CETSA\20251122_Model_development\GitHub_GeneDependancy_prediction\outputs\clustering")
 
 MIN_RNA_SD = 0.7
 N_JOBS             = 11

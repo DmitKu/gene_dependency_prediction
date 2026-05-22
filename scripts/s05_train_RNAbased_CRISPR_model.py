@@ -1,20 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-train.py
+s05_train_RNAbased_CRISPR_model.py
 ========
-Training entry-point for CRISPR Sensitivity Model v3.
+Training entry-point for CRISPR Sensitivity Model.
 
 Usage
 -----
-    python scripts/train.py
+    python scripts/s05_train_RNAbased_CRISPR_model.py
 
 All hyper-parameters are defined in the CONFIG section below.
 Outputs written to the working directory:
-    crispr_checkpoint_v3.pt          — full checkpoint (resume-compatible)
-    crispr_best_model_v3.pt          — best val-loss model weights
-    crispr_best_pearson_model_v3.pt  — best per-CL Pearson model weights
-    crispr_model_weights_v3_final.pt — final weights after training
-    training_history_v3.csv          — per-epoch metrics log
+    crispr_checkpoint.pt          — full checkpoint (resume-compatible)
+    crispr_best_pearson_model.pt  — best per-CL Pearson model weights
+    crispr_model_weights_final.pt — final weights after training
+    training_history.csv          — per-epoch metrics log
 """
 
 import sys
@@ -26,6 +25,8 @@ import torch
 import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
+import shutil
+import math
 
 # ── Local imports ────────────────────────────────────────────────────────────
 # Ensure the project root (parent of scripts/) is on the path so that
@@ -34,7 +35,7 @@ _root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_root))
 
 
-from src.RNAbased_crispr_model import (
+from src.utils_RNAbased_crispr_model import (
     GeneDataset,
     CRISPRSensitivityModelV3,
     combined_loss,
@@ -46,30 +47,24 @@ from src.RNAbased_crispr_model import (
 # CONFIG
 # ============================================================
 
-_root = Path(
-    r"C:\Users\dkuch\Documents\Blog_ideas_data\Computational"
-    r"\MOA_Prediction_based_on_CETSA\20251122_Model_development"
-    r"\GitHub_GeneDependancy_prediction"
-)
-
-H5_PATH          = _root / "outputs" / "H5_model_data" / "model_H5_data.h5"
-TRANSFORMER_PATH = _root / "outputs" / "RNA_fetures" / "chronos_quantile_transformer.pkl"
-SAVE_PATH = _root / "outputs" /  "model_training" 
+H5_PATH          = _root/"outputs"/"H5_model_data"/"model_H5_data.h5"
+TRANSFORMER_PATH = _root/"outputs"/"RNA_fetures"/"chronos_quantile_transformer.pkl"
+SAVE_PATH = _root /"outputs"/"model_training" 
 
 # Training
 EPOCHS     = 200
-BATCH_SIZE = 20_000
-LR         = 1e-3
-ALPHA      = 0.5       # weight between MSE (ALPHA) and Pearson (1-ALPHA)
-PATIENCE   = 25
+BATCH_SIZE = 8_192
+LR         = 3e-3
+#ALPHA      = 0.5       # weight between MSE (ALPHA) and Pearson (1-ALPHA)
+PATIENCE   = 10
 
 # Model architecture
 MODEL_KWARGS = dict(
-    hidden_dim    = 256,
+    hidden_dim    = 128,
     n_attn_slots  = 64,
     n_attn_heads  = 4,
-    bypass_rank   = 64,
-    compress_dim  = 256,
+    bypass_rank   = 32,
+    compress_dim  = 512,
     dropout       = 0.2,
 )
 
@@ -77,11 +72,11 @@ MODEL_KWARGS = dict(
 RESUME_FROM = None
 
 # Output paths
-CHECKPOINT_PATH     = SAVE_PATH / "crispr_checkpoin.pt"
-BEST_LOSS_PATH      = SAVE_PATH / "crispr_best_model.pt"
-BEST_PEARSON_PATH   = SAVE_PATH / "crispr_best_pearson_model.pt"
-FINAL_WEIGHTS_PATH  = SAVE_PATH / "crispr_model_weights_final.pt"
-LOG_PATH            = SAVE_PATH / "training_history .csv"
+CHECKPOINT_PATH     = SAVE_PATH/"crispr_checkpoint.pt"
+BEST_LOSS_PATH      = SAVE_PATH/"crispr_best_model.pt"
+BEST_PEARSON_PATH   = SAVE_PATH/"crispr_best_pearson_model.pt"
+FINAL_WEIGHTS_PATH  = SAVE_PATH/"crispr_model_weights_final.pt"
+LOG_PATH            = SAVE_PATH/"training_history .csv"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -140,16 +135,29 @@ def build_optimizer(model: nn.Module, lr: float):
     return optimizer
 
 
-def build_scheduler(optimizer, train_loader, epochs: int, lr: float):
-    return torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr          = lr,
-        steps_per_epoch = len(train_loader),
-        epochs          = epochs,
-        pct_start       = 0.05,
-        anneal_strategy = "cos",
-    )
+# def build_scheduler(optimizer, train_loader, epochs: int, lr: float):
+#     return torch.optim.lr_scheduler.OneCycleLR(
+#         optimizer,
+#         max_lr          = lr,
+#         steps_per_epoch = len(train_loader),
+#         epochs          = epochs,
+#         pct_start       = 0.05,
+#         anneal_strategy = "cos",
+#     )
 
+def build_scheduler(optimizer, train_loader, epochs: int, lr: float):
+    steps_per_epoch = len(train_loader)
+    
+    # Restart the learning rate every 50 epochs
+    restart_epochs = 75
+    T_0 = steps_per_epoch * restart_epochs
+    
+    return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=T_0,         # Steps until the first restart
+        T_mult=1,        # Keep the restart interval constant (1) or double it each time (2)
+        eta_min=1e-6     # Minimum learning rate at the bottom of the cycle
+    )
 
 # ============================================================
 # Training / validation steps
@@ -293,6 +301,21 @@ def log_epoch(path, epoch, lr,
 # ============================================================
 # Main
 # ============================================================
+# def get_dynamic_alpha(epoch: int, warmup_epochs: int = 30, start_alpha: float = 0.8, end_alpha: float = 0.2) -> float:
+#     """Calculates the current alpha based on the epoch."""
+#     if epoch >= warmup_epochs:
+#         return end_alpha
+#     decay_rate = (start_alpha - end_alpha) / warmup_epochs
+#     return start_alpha - (decay_rate * epoch)
+
+
+def get_dynamic_alpha(epoch: int, warmup_epochs: int = 30, start_alpha: float = 0.8, end_alpha: float = 0.2) -> float:
+    if epoch >= warmup_epochs:
+        return end_alpha
+    # Cosine transition
+    progress = epoch / warmup_epochs
+    cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
+    return end_alpha + (start_alpha - end_alpha) * cosine_decay
 
 def main():
     # ── Validate paths ───────────────────────────────────────────────────────
@@ -328,11 +351,12 @@ def main():
     start_epoch      = 0
     best_val_loss    = float("inf")
     best_pearson     = -1.0
+    best_pearson_pcl = -float('inf')
     patience_counter = 0
 
     if RESUME_FROM is not None:
         print(f"\nResuming from: {RESUME_FROM}")
-        start_epoch, best_val_loss, best_pearson, patience_counter = load_checkpoint(
+        start_epoch, best_val_loss, best_pearson_pcl, patience_counter = load_checkpoint(
             RESUME_FROM, model, optimizer, scheduler, scaler, DEVICE
         )
         print(f"  → Resuming at epoch {start_epoch} | best val loss {best_val_loss:.6f}")
@@ -349,7 +373,7 @@ def main():
     if torch.cuda.is_available():
         print(f"GPU              : {torch.cuda.get_device_name(0)}")
     print(f"Trainable params : {total_params:,}")
-    print(f"Loss             : {ALPHA:.1f} × MSE  +  {1-ALPHA:.1f} × (1-Pearson)  +  0.1 × std_match")
+    #print(f"Loss             : {ALPHA:.1f} × MSE  +  {1-ALPHA:.1f} × (1-Pearson)  +  0.1 × std_match")
     print(
         f"Architecture     : cross-attention "
         f"({model.cell_tokenizer.n_slots} slots, "
@@ -363,12 +387,20 @@ def main():
     # ── Training loop ────────────────────────────────────────────────────────
     for epoch in range(start_epoch, EPOCHS):
         epoch_start = time.time()
+        
+        # 1. Calculate the dynamic alpha for this epoch
+        current_alpha = get_dynamic_alpha(
+            epoch=epoch, 
+            warmup_epochs=30, # Adjust based on when you want the transition to end
+            start_alpha=0.8, 
+            end_alpha=0.2
+        )
 
         train_loss, train_mse, train_pearson = train_one_epoch(
-            model, train_loader, optimizer, scheduler, scaler, ALPHA, DEVICE
+            model, train_loader, optimizer, scheduler, scaler, current_alpha, DEVICE
         )
         val_loss, val_mse, val_pearson = validate_one_epoch(
-            model, val_loader, ALPHA, DEVICE
+            model, val_loader, current_alpha, DEVICE
         )
         mae, rmse, pearson_full, pearson_pcl, pearson_pcl_sd = evaluate(
             model, val_loader, DEVICE, qt=qt
@@ -403,20 +435,22 @@ def main():
         )
 
         # ── Checkpoint on best val loss ──────────────────────────────────────
-        if val_loss < best_val_loss:
-            best_val_loss    = val_loss
+        if pearson_pcl > best_pearson_pcl:
+            best_pearson_pcl = pearson_pcl
             patience_counter = 0
+            
             save_checkpoint(
                 CHECKPOINT_PATH, epoch, model, optimizer, scheduler, scaler,
-                best_val_loss, best_pearson, pearson_full, pearson_pcl,
-                patience_counter, ALPHA, TRANSFORMER_PATH,
+                val_loss, best_pearson_pcl, pearson_full, pearson_pcl,
+                patience_counter, current_alpha, TRANSFORMER_PATH,
             )
-            torch.save(model.state_dict(), BEST_LOSS_PATH)
+            torch.save(model.state_dict(), BEST_PEARSON_PATH)
+            
             print(
-                f"  ✓ Best val loss {best_val_loss:.6f} | "
+                f"  ✓ Best per-CL Pearson {best_pearson_pcl:.4f} | "
                 f"MAE {mae:.4f} | RMSE {rmse:.4f} | "
                 f"Pearson(global) {pearson_full:.4f} | "
-                f"Pearson(per-CL) {pearson_pcl:.4f} ± {pearson_pcl_sd:.4f} — saved"
+                f"Val Loss {val_loss:.6f} (Alpha: {current_alpha:.2f}) — saved"
             )
         else:
             patience_counter += 1
@@ -425,15 +459,9 @@ def main():
                 print(f"Early stopping at epoch {epoch+1}")
                 break
 
-        # ── Checkpoint on best per-CL Pearson ───────────────────────────────
-        if pearson_pcl > best_pearson:
-            best_pearson = pearson_pcl
-            torch.save(model.state_dict(), BEST_PEARSON_PATH)
-            print(f"  ✓ Best per-CL Pearson {pearson_pcl:.4f} ± {pearson_pcl_sd:.4f} — saved")
-
+       
     # ── Final save ───────────────────────────────────────────────────────────
-    model.load_state_dict(torch.load(BEST_LOSS_PATH, map_location=DEVICE))
-    torch.save(model.state_dict(), FINAL_WEIGHTS_PATH)
+    shutil.copy(BEST_PEARSON_PATH, FINAL_WEIGHTS_PATH)
     print(f"Training complete. Final weights saved to {FINAL_WEIGHTS_PATH}")
 
 
