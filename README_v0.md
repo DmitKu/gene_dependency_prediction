@@ -169,35 +169,35 @@ The Attention Network extracts cluster‑level feature importance, enabling biol
 model structure:
 
 ```mermaid
-graph LR
-    subgraph "Input Layer"
-        GF[Gene Features] --> G_ENC(Gene Encoder)
-        CF[Cell Features] --> C_TOK(Cell Tokenizer)
+graph TB
+    subgraph Input_Layer [Input Layer]
+        GF["Gene Features (27)"] --> G_ENC(Gene Encoder)
+        CF["Cell Features (2388)"] --> C_TOK(Cell Tokenizer)
     end
 
-    subgraph "Biologically Grounded Attention"
+    subgraph Attention [Biologically Grounded Attention]
         G_ENC --> G_EMB[Gene Embedding]
         C_TOK --> C_TOK_SEQ[Cell Token Sequence]
-        G_EMB -.->|Query| CA1(Cross-Attention 1)
+        G_EMB -.->|Query| CA1(Cross-Attention)
         C_TOK_SEQ -.->|K, V| CA1
-        CA1 --> CA2(Cross-Attention 2)
-        CA2 --> C_CTX[Refined Context]
+        CA1 --> C_CTX[Refined Context]
     end
 
-    subgraph "FiLM-Conditioned Trunk"
+    subgraph Trunk [FiLM-Conditioned Trunk]
         C_CTX --> MRG(Merge)
         G_EMB --> COND(Conditioning)
         MRG --> RES1(Residual Blocks)
-        COND -.-|FiLM Modulation| RES1
+        COND -.->|FiLM Modulation| RES1
     end
 
-    subgraph "Output"
-        RES1 --> HEAD(Head)
+    subgraph Output_Layer [Output]
+        RES1 --> HEAD(Prediction Head)
         G_EMB -.-> BYP(Linear Bypass)
-        BYP --> ADD((+))
-        HEAD --> ADD
-        ADD --> OUT[Prediction]
+        HEAD --> MERGE_OUT{Sum}
+        BYP --> MERGE_OUT
+        MERGE_OUT --> OUT[CRISPR Prediction]
     end
+```
 
 
 Dynamic Loss Weighting: Employs a dynamic alpha parameter that uses a cosine schedule to transition between MSE-focused training and Pearson-correlation-focused training.
