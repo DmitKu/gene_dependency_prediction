@@ -1,94 +1,145 @@
-# **Latent Gene Dependency Prediction via Manifold Clustering
-This project implements a hybrid R/Python pipeline to predict DepMap Chronos scores using biologically informed latent features. Instead of relying on raw expression matrices, the model uses manifold‑derived gene clusters to improve interpretability and predictive power.
+# BioAttention: Deep Learning for Gene Essentiality
+A biologically informed attention model leveraging manifold-guided RNA features to predict CRISPR dependency scores.
 
-🔬 Scientific Logic
-Standard gene‑by‑gene modeling often misses functional redundancy across pathways. This pipeline addresses that by combining correlation structure, manifold learning, and attention‑based + FiLM deep modeling.
+## Highlights:
 
-Correlation Mapping — Identify transcriptional correlates of gene dependency [RNA vs CRISPR]
+Architecture: Combines Manifold Learning (DBSCAN/UMAP) with Deep Learning (Cross-Attention + FiLM) to capture non-linear genetic interactions.
 
-Manifold Learning — Reduce the dependency–expression space
+Capability: Predicts gene dependency scores by integrating cell-line transcriptomic signatures with latent functional clusters.
 
-Latent Feature Engineering — Group genes into ~1,850 functional clusters
+Performance: Designed for high-throughput, multi-core processing, effectively scaling to the full DepMap 25Q3 dataset.
 
-Attention+FiLM‑Based Prediction — Learn which gene modules drive cell‑line‑specific vulnerabilities
 
-##Project Structure
+> A hybrid R/Python pipeline that predicts DepMap Chronos gene dependency scores using biologically informed latent features derived from RNA expression/CRISPR correlation manifold clustering.
 
+---
+
+## Table of contents
+
+- [Scientific rationale](#scientific-rationale)
+- [Project structure](#project-structure)
+- [Getting started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Environment setup](#environment-setup)
+- [Pipeline](#pipeline)
+  - [Step 1 — Correlation mapping (R)](#step-1--correlation-mapping-r)
+  - [Step 2 — Manifold clustering (Python)](#step-2--manifold-clustering-python)
+  - [Step 3 — Feature engineering (Python)](#step-3--feature-engineering-python)
+  - [Step 4 — HDF5 data preparation (Python)](#step-4--hdf5-data-preparation-python)
+  - [Step 5 — Model training (Python)](#step-5--model-training-python)
+- [Model architecture](#model-architecture)
+- [Results](#results)
+
+---
+
+## Scientific rationale
+
+Standard gene-by-gene dependency modeling often misses functional redundancy across biological pathways. This pipeline addresses that limitation by combining CRISPR-dependent RNA  structure, manifold learning, and an attention-based deep learning architecture with FiLM conditioning.
+
+
+The four key ideas:
+
+| Stage | Description |
+|---|---|
+| **Correlation mapping** | Identifies transcriptional correlations of gene dependency (RNA vs CRISPR) |
+| **Manifold learning** | Reduces the high-dimensional dependency–expression space |
+| **Latent feature engineering** | Groups genes into 2388 functional clusters in RNA space |
+| **Attention + FiLM prediction** | Learns which gene modules drive cell-line-specific vulnerabilities |
+
+---
+
+## Project structure
 
 ```text
-gene_dependency_prediction/                                  
+gene_dependency_prediction/
 ├── outputs/
-│   ├── clustering
-│   ├── RNA_fetures
-│   ├── H5_model_data
-│   ├── model_training 
+│   ├── clustering/            # UMAP plots, cluster assignments
+│   ├── RNA_features/          # Feature matrices
+│   ├── H5_model_data/         # HDF5 training files
+│   └── model_training/        # Checkpoints, metrics, weights
 ├── src/
-│   ├── utils_correlation.R                # Speed optimized correlation functions
-│   ├── utils_manifold_clustering.py       # UMAP + DBSCAN clustering
-│   ├── utils_feature_engineering.py       # PyTorch Attention Network architecture
-│   ├── utils_hdf5_builder.py              # H5 file functions preparation
-│   └── utils_RNAbased_crispr_model.py     # PyTorch Attention+FiLM Network architecture
+│   ├── utils_correlation.R                  # Speed-optimised correlation functions
+│   ├── utils_manifold_clustering.py         # UMAP + DBSCAN clustering
+│   ├── utils_feature_engineering.py         # Feature engineering utilities
+│   ├── utils_hdf5_builder.py                # HDF5 file preparation
+│   └── utils_RNAbased_crispr_model.py       # Attention + FiLM network architecture
 ├── scripts/
-│   ├── s01_run_depmap_corr_analysis.R     # R driver for correlation computation
-│   ├── s02_manifold_clustering.py         # biology driven UMAP+DBscan clustering
-│   ├── s03_feature_engineering.py         # Feature engineering, cell line features and CRISPRed gene features 
-│   ├── s04_build_hdf5.py                  # preparation of H5 file to work with ~7M samples
-│   └── s05_train_RNAbased_CRISPR_model.py # model training
-├── environment.yml                        # Conda environment configuration
+│   ├── s01_run_depmap_corr_analysis.R        # Correlation computation driver
+│   ├── s02_manifold_clustering.py            # PCA + UMAP + DBSCAN clustering
+│   ├── s03_feature_engineering.py            # Cell-line and gene feature engineering
+│   ├── s04_build_hdf5.py                     # HDF5 file builder (~7M samples)
+│   └── s05_train_RNAbased_CRISPR_model.py    # Model training
+├── environment.yml
 └── README.md
 ```
 
+---
 
-##Getting Started
-1. Prerequisites
-Place the following DepMap 25Q3 datasets into data/raw/:
+## Getting started
 
-Expression_Public_25Q3_subsetted.csv [too big, not provided]
-CRISPR_Chronos_subsetted.csv [too big, not provided]
+### Prerequisites
 
-2. Environment Setup
-bash
+Download the following [DepMap 25Q3](https://depmap.org/portal/) datasets and place them in `data/raw/`:
+
+| File | Note |
+|---|---|
+| `Expression_Public_25Q3_subsetted.csv` | Not included — too large |
+| `CRISPR_Chronos_subsetted.csv` | Not included — too large |
+
+### Environment setup
+
+```bash
 conda env create -f environment.yml
 conda activate depmap-env
+```
 
-3. Running the Pipeline
-Step 1 — Correlation Calculation (R, used R for fun)
-Computes Spearman correlations between CRISPR sensitivity and RNA expression.
-this step take very long time because the matrix is ~17000 (RNA) x 17000(CRISPR) gene.
-Highly optimized for high speed to run it on labtop mith mith multiple cores.
+---
 
-Usage:
-bash
-Rscript scripts/01_run_cor.R
+## Pipeline
 
-Step 2 — manifold clustering (Python)
-Driver for the UMAP + DBSCAN gene clustering step.
-Runs UMAP, DBscan clustering and asigned each RNA to a specific cluster. This step is crutial for for further workflow because it generates the basis for identification of closly related gene. Cluster identtified in this step will help to reduce the dimentinality and at the same time create a bases to find non-linear interactoins between cripred gene and cell lines state
+### Step 1 — Correlation mapping (R)
 
-Usage:
-bash
+Computes Spearman correlations between CRISPR sensitivity and RNA expression across the full ~17,000 × 17,000 gene matrix. The implementation is multi-core optimised to run on a laptop.
+
+```bash
+Rscript scripts/s01_run_depmap_corr_analysis.R
+```
+
+> ⚠️ This step is computationally intensive. Runtime depends on the number of available cores. (takes several days on a regular laptop)
+
+---
+
+### Step 2 — Manifold clustering (Python)
+
+Runs PCA + UMAP dimensionality reduction followed by DBSCAN clustering to assign each RNA gene to a functional cluster. This step is critical — it generates the biological groupings that underpin all downstream feature engineering and non-linear modelling.
+
+```bash
 python scripts/s02_manifold_clustering.py
+```
 
-Output:
-Selected_RNA_CRISPR.pkl: A Python pickle file containing two sets of genes that passed the quality control filters:
-crispr_gene: Genes meeting the activity/inactivity diversity threshold.
-rna_gene: Genes meeting the variance threshold (including the CRISPR genes).
-clusters.csv (generated by save_clusters): A mapping of gene identifiers to their assigned DBSCAN cluster labels, along with their coordinates in the UMAP manifold.
+**Outputs** (saved to `outputs/clustering/`):
 
-cluster_histogram.png: A frequency distribution plot showing the number of genes assigned to each cluster identified by DBSCAN.
-umap_plot.png: A 2D scatter plot visualizing the manifold projection of genes, color-coded by their cluster membership.
-highlight_[GENE_NAME].png: Individual plots for each gene specified in the HIGHLIGHT_GENES configuration list (e.g., MET, EGFR, MYC, TP53). These highlight the specific location of these genes within the UMAP manifold to provide biological context to the clusters.
+| File | Description |
+|---|---|
+| `Selected_RNA_CRISPR.pkl` | Genes passing QC: `crispr_gene` (activity diversity threshold) and `rna_gene` (variance threshold) |
+| `UMAP_with_clusters.csv` | Gene-to-cluster mapping with 2D UMAP coordinates |
+| `cluster_histogram.png` | Frequency distribution of genes per cluster |
+| `umap_plot.png` | 2D UMAP scatter coloured by cluster membership |
+| `highlight_[GENE_NAME].png` | Per-gene UMAP highlights for selected genes (e.g. MET, EGFR, MYC, TP53) |
 
-Notes on Output Generation
-Directory Structure: All outputs are saved to outputs/clustering/.
-Naming Convention: The visualizations are generated based on the parameters set in the CONFIG block, specifically reflecting the UMAP dimensionality reduction parameters (e.g., PCA_COMPONENTS, UMAP_METRIC, UMAP_NEIGHBORS).
-RAM Usage: Because this script performs a pivot operation on large correlation matrices, it utilizes dask to manage memory usage efficiently during the conversion from long to wide format.
+> **Note on memory:** The correlation matrix pivot is performed via `dask` for efficient out-of-core memory management.
 
-Step 3 — feature_engineering (Python)
-This step uses clusters to compute RNA-based cell line features and RNA-based gene
-features for each CRISPRed gene in the data. Devisoin to cell line features and gene features
-allows to implement attantion deep learning techniqur to utilise interactions non-linear interactions
-effecting gene dependency sensitivity.
+---
+
+### Step 3 — Feature engineering (Python)
+
+Computes RNA-based gene features and cell-line features for every CRISPRed gene. Separating gene-level and cell-line-level representations enables the cross-attention mechanism in the downstream model to exploit non-linear interactions driving dependency sensitivity.
+
+```bash
+python scripts/s03_feature_engineering.py
+```
+
+**Pipeline internals:**
 
 ```mermaid
 flowchart TD
@@ -129,111 +180,112 @@ flowchart TD
     style O3 fill:#b5d4f4,stroke:#185fa5
 ```
 
-Usage:
-bash
-python scripts/s03_feature_engineering.py
+**Outputs** (saved to `outputs/RNA_features/`):
 
-Outputs
-RNA_based_features_CRISPR.csv: The primary gene-level feature matrix.
-Content: Contains RNA expression features, cluster-specific statistics (e.g., leave-one-out metrics), and transformed CRISPR scores for every gene-cell line combination.
-Structure: Includes a split column, which categorizes data into train, val, and test sets based on cell lines to ensure robust evaluation.
-Cell_line_based_features.csv: A cluster-sum wide table.
-chronos_quantile_transformer.pkl: A serialized scikit-learn QuantileTransformer.Crucial for evaluation; it stores the transformation parameters fitted on the training set, allowing you to inverse-transform the predicted CRISPR scores back into the original scale for interpretation.
+| File | Description |
+|---|---|
+| `RNA_based_features_CRISPR.csv` | Gene-level feature matrix with leave-one-out cluster stats, transformed CRISPR target, and `split` column |
+| `Cell_line_based_features.csv` | Cluster-sum wide table per cell line with `split` column |
+| `chronos_quantile_transformer.pkl` | Fitted `QuantileTransformer` — required for inverse-transforming predictions back to Chronos scale at evaluation |
 
+---
 
-Step 4 — H5 data file (Python)
-This step uses clusters to compute RNA-based cell line features and RNA-based gene features for each CRISPRed gene in the data. Devisoin to cell line features and gene features allows to implement attantion deep learning techniqur to utilise interactions non-linear interactions
-effecting gene dependency sensitivity. Pipeline step 3 — build the gene-level feature matrix and cluster-sum table.
+### Step 4 — HDF5 data preparation (Python)
 
-Run from the project root:
-    python scripts/s03_feature_engineering.py
+Compiles all feature matrices into a single HDF5 file optimised for loading ~7M gene–cell-line samples during training.
 
-model_H5_data.h5: A comprehensive HDF5 file containing the structured data needed to train and evaluate your models.
+```bash
+python scripts/s04_build_hdf5.py
+```
 
-Output: 
-Content:This file stores normalized cell-line features (cl_feats), gene-level features (gene_feats), and the target CRISPR dependency scores (crispr_vals).
-Metadata: It includes critical indexing and statistical metadata, such as normalization parameters (means and standard deviations) and the pre-computed train/val/test indices, ensuring consistency between training and inference.
+**Key steps:**
 
-Key Orchestration Steps
-The script performs a final verification and compilation sequence:
-Data Validation: Ensures consistency of ModelID identifiers between cell-line and gene-level datasets.
-Normalization: Computes feature statistics (training set only) to prevent data leakage and applies scaling and imputation to the entire dataset.
-Indexing: Extracts formal train/val/test masks for both gene-level records and cell-line groupings, facilitating proper data partitioning.
-Verification: Performs an integrity check on the generated HDF5 file to ensure all datasets are correctly written and accessible before the modeling phase.
+1. **Validation** — ensures `ModelID` consistency between cell-line and gene-level datasets
+2. **Normalisation** — computes mean/SD statistics on the training split only (no data leakage)
+3. **Indexing** — extracts formal train/val/test masks for both gene records and cell-line groupings
+4. **Integrity check** — verifies all HDF5 datasets are correctly written before the modelling phase
 
-Step 4 — attantion+Film model training (Python)
-Running this training script generates several artifacts essential for model persistence, evaluation, and resuming training:
-Key Methodology: Attention Mechanism
-The Attention Network extracts cluster‑level feature importance, enabling biological conceptiualizatoin and interpretation.
+**Output** (`outputs/H5_model_data/model_H5_data.h5`):
 
-model structure:
+| Dataset | Content |
+|---|---|
+| `cl_feats` | Normalised cell-line features |
+| `gene_feats` | Gene-level features |
+| `crispr_vals` | Target CRISPR dependency scores |
+| Metadata | Normalisation parameters, train/val/test indices |
+
+---
+
+### Step 5 — Model training (Python)
+
+Trains the Attention + FiLM network. Requires `model_H5_data.h5` and `chronos_quantile_transformer.pkl` from earlier steps. A CUDA-enabled GPU is strongly recommended.
+
+```bash
+python scripts/s05_train_RNAbased_CRISPR_model.py
+```
+
+**Training features:**
+
+| Feature | Details |
+|---|---|
+| **Dynamic loss weighting** | Cosine schedule transitions from MSE-focused to Pearson-correlation-focused training |
+| **Mixed precision** | `torch.amp` with gradient clipping for numerical stability |
+| **Differential weight decay** | Separate decay rates for projection/head layers vs core model parameters |
+| **Early stopping** | Monitors per-cell-line Pearson correlation; stops after `PATIENCE` epochs without improvement |
+| **Chronos-space evaluation** | Inverse-transforms predictions via the saved `QuantileTransformer` for biologically meaningful metrics |
+
+> All hyperparameters (learning rate, architecture dimensions, dropout, etc.) are defined in the `CONFIG` block at the top of the training script.
+
+**Outputs** (saved to `outputs/model_training/`):
+
+| File | Description |
+|---|---|
+| `crispr_checkpoint.pt` | Full checkpoint — model weights, optimiser/scheduler state, epoch metadata. Use to resume training. |
+| `crispr_best_pearson_model.pt` | Weights from the epoch with the highest per-cell-line Pearson correlation |
+| `crispr_model_weights_final.pt` | Final model state after training concludes |
+| `training_history.csv` | Per-epoch log: LR, train/val loss, Pearson scores, MAE, RMSE |
+
+---
+
+## Model architecture
 
 ```mermaid
-graph LR
-    subgraph "Input Layer"
-        GF[Gene Features] --> G_ENC(Gene Encoder)
-        CF[Cell Features] --> C_TOK(Cell Tokenizer)
+graph TB
+    subgraph Input_Layer [Input Layer]
+        GF[Gene Features (27)] --> G_ENC(Gene Encoder)
+        CF[Cell Features (2388)] --> C_TOK(Cell Tokenizer)
     end
 
-    subgraph "Biologically Grounded Attention"
+    subgraph Attention [Biologically Grounded Attention]
         G_ENC --> G_EMB[Gene Embedding]
         C_TOK --> C_TOK_SEQ[Cell Token Sequence]
-        G_EMB -.->|Query| CA1(Cross-Attention 1)
+        G_EMB -.->|Query| CA1(Cross-Attention)
         C_TOK_SEQ -.->|K, V| CA1
-        CA1 --> CA2(Cross-Attention 2)
-        CA2 --> C_CTX[Refined Context]
+        CA1 --> C_CTX[Refined Context]
     end
 
-    subgraph "FiLM-Conditioned Trunk"
+    subgraph Trunk [FiLM-Conditioned Trunk]
         C_CTX --> MRG(Merge)
         G_EMB --> COND(Conditioning)
         MRG --> RES1(Residual Blocks)
-        COND -.-|FiLM Modulation| RES1
+        COND -.->|FiLM Modulation| RES1
     end
 
-    subgraph "Output"
-        RES1 --> HEAD(Head)
+    subgraph Output_Layer [Output]
+        RES1 --> HEAD(Prediction Head)
         G_EMB -.-> BYP(Linear Bypass)
-        BYP --> ADD((+))
-        HEAD --> ADD
-        ADD --> OUT[Prediction]
+        HEAD --> MERGE_OUT{Sum}
+        BYP --> MERGE_OUT
+        MERGE_OUT --> OUT[CRISPR Prediction]
     end
+```
 
+The cross-attention mechanism allows the model to learn which gene clusters are most informative for predicting dependency in a given cell line, providing a biologically interpretable attention map alongside predictions.
 
-Dynamic Loss Weighting: Employs a dynamic alpha parameter that uses a cosine schedule to transition between MSE-focused training and Pearson-correlation-focused training.
+---
 
-Mixed Precision & Clipping: Utilizes torch.amp (Automatic Mixed Precision) and gradient clipping to maintain stability during training.
+## Results
 
-Differential Weight Decay: Applies different weight decay rates to the projection/head layers and the core model parameters to optimize convergence for extreme dependency scores.
-
-Early Stopping: Monitors the per-CL Pearson metric to automatically cease training if no improvement is seen over the defined PATIENCE period.
-
-Evaluation in Chronos Space: Uses the previously generated QuantileTransformer to report metrics in the original "Chronos" dependency scale, providing biologically meaningful performance feedback.
-
-Output:
-a) Model Weights & Checkpoints
-crispr_checkpoint.pt: A full training checkpoint. It contains the model weights, optimizer/scheduler states, and current metadata (epoch, best metrics, patience counter), allowing training to be resumed from the exact state of a previous run.
-
-crispr_best_pearson_model.pt: The model weights corresponding to the epoch that achieved the highest performance on the per-cell-line (per-CL) Pearson correlation metric.
-
-crispr_model_weights_final.pt: The final model state after training has concluded (either via reaching the epoch limit or early stopping).
-
-b) Training Metrics
-training_history.csv: A comprehensive per-epoch log.
-
-Included Metrics: Learning rate, training and validation loss, batch-level Pearson scores, and global evaluation metrics (MAE, RMSE, global Pearson, mean/SD of per-CL Pearson).
-
-Purpose: Used to visualize training stability and identify potential overfitting.
-
-Notes for README.md
-Prerequisites: This script requires model_H5_data.h5 and the chronos_quantile_transformer.pkl file generated by previous pipeline steps.
-Hardware: The script is optimized for CUDA-enabled GPUs; ensure your environment is configured for torch training.
-Configuration: All hyperparameters (learning rate, architecture dimensions, dropout, etc.) are encapsulated in the CONFIG block at the top of the file.
-
-
-
-
-📈 Results & Medium Blog (in progress yet)
-A full breakdown of biological insights and model performance is available here:
-Medium Article
-
+> 📝 A full breakdown of biological insights and model performance is in progress.
+>
+> **Medium article:** *(coming soon)*
