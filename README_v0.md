@@ -171,8 +171,8 @@ model structure:
 ```mermaid
 graph TB
     subgraph Input_Layer [Input Layer]
-        GF["Gene Features (27)"] --> G_ENC(Gene Encoder)
-        CF["Cell Features (2388)"] --> C_TOK(Cell Tokenizer)
+        GF["Gene Features: 27"] --> G_ENC(Gene Encoder)
+        CF["Cell Features: 2388"] --> C_TOK(Cell Tokenizer)
     end
 
     subgraph Attention [Biologically Grounded Attention]
