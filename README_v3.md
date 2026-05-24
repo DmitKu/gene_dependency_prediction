@@ -1,4 +1,14 @@
-# Latent Gene Dependency Prediction via Manifold Clustering
+# BioAttention: Deep Learning for Gene Essentiality
+A biologically informed attention model leveraging manifold-guided RNA features to predict CRISPR dependency scores.
+
+## Highlights:
+
+Architecture: Combines Manifold Learning (DBSCAN/UMAP) with Deep Learning (Cross-Attention + FiLM) to capture non-linear genetic interactions.
+
+Capability: Predicts gene dependency scores by integrating cell-line transcriptomic signatures with latent functional clusters.
+
+Performance: Designed for high-throughput, multi-core processing, effectively scaling to the full DepMap 25Q3 dataset.
+
 
 > A hybrid R/Python pipeline that predicts DepMap Chronos gene dependency scores using biologically informed latent features derived from RNA expression/CRISPR correlation manifold clustering.
 
@@ -24,7 +34,7 @@
 
 ## Scientific rationale
 
-Standard gene-by-gene dependency modeling often misses functional redundancy across biological pathways. This pipeline addresses that limitation by combining RNA/CRISPR correlation structure, manifold learning, and an attention-based deep learning architecture with FiLM conditioning.
+Standard gene-by-gene dependency modeling often misses functional redundancy across biological pathways. This pipeline addresses that limitation by combining CRISPR-dependent RNA  structure, manifold learning, and an attention-based deep learning architecture with FiLM conditioning.
 
 
 The four key ideas:
@@ -242,8 +252,8 @@ python scripts/s05_train_RNAbased_CRISPR_model.py
 ```mermaid
 graph TB
     subgraph Input_Layer [Input Layer]
-        GF[Gene Features] --> G_ENC(Gene Encoder)
-        CF[Cell Features] --> C_TOK(Cell Tokenizer)
+        GF[Gene Features (27)] --> G_ENC(Gene Encoder)
+        CF[Cell Features (2388)] --> C_TOK(Cell Tokenizer)
     end
 
     subgraph Attention [Biologically Grounded Attention]

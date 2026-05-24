@@ -168,7 +168,7 @@ def train_one_epoch(model, loader, optimizer, scheduler, scaler, alpha, device):
     model.train()
     total_loss = total_mse = total_pearson = 0.0
 
-    for gene_feat, cell_feat, target, _ in loader:
+    for gene_feat, cell_feat, target, _, _ in loader:
         gene_feat = gene_feat.to(device, non_blocking=True)
         cell_feat = cell_feat.to(device, non_blocking=True)
         target    = target.to(device,    non_blocking=True)
@@ -207,7 +207,7 @@ def validate_one_epoch(model, loader, alpha, device):
     model.eval()
     total_loss = total_mse = total_pearson = 0.0
 
-    for gene_feat, cell_feat, target, _ in loader:
+    for gene_feat, cell_feat, target, _, _ in loader:
         gene_feat = gene_feat.to(device, non_blocking=True)
         cell_feat = cell_feat.to(device, non_blocking=True)
         target    = target.to(device,    non_blocking=True)

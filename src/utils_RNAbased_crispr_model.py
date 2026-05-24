@@ -99,6 +99,7 @@ class GeneDataset(Dataset):
             self.cl_features[self.cl_indices[idx]],
             self.crispr[idx].unsqueeze(0),
             self.cl_indices[idx],
+            idx, 
         )
 
 
@@ -511,7 +512,7 @@ def evaluate(
     all_pred, all_target, all_cl = [], [], []
 
     with torch.no_grad():
-        for gene_feat, cell_feat, target, cl_idx in loader:
+        for gene_feat, cell_feat, target, cl_idx, _ in loader:
             gene_feat = gene_feat.to(device, non_blocking=True)
             cell_feat = cell_feat.to(device, non_blocking=True)
             with autocast(device):
