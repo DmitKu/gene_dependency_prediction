@@ -4,3 +4,4 @@ outputs/RNA_fetures/RNA_based_features_CRISPR.csv
 outputs/H5_model_data/
 outputs/H5_model_data/model_H5_data.h5
 outputs/attention_audit
+outputs/model_predictions/predictions_test.csv
