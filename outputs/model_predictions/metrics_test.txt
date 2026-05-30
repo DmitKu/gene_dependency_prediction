@@ -3,7 +3,9 @@ Split          : test
 Bypass         : active
 N samples      : 784,881
 N cell lines   : 111
+N genes        : 7071
 MAE            : 0.213697  (Chronos space)
 RMSE           : 0.311441  (Chronos space)
 Pearson global : 0.583472  (Chronos space)
 Pearson per-CL : 0.585615 ± 0.047610  (Chronos space)
+Pearson per-Gene : 0.038486 ± 0.117742

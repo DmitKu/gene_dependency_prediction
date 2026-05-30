@@ -25,6 +25,8 @@ import torch
 from torch.utils.data import DataLoader
 from torch.amp import autocast
 
+import numpy as np
+import pandas as pd
 # ── Local imports ─────────────────────────────────────────────────────────────
 _root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_root))
@@ -172,12 +174,59 @@ def main():
             continue
         cl_pearsons_raw.append(pearson(all_pred[mask], all_target[mask]))
     n_cl = len(cl_pearsons_raw)
+    
+    # ------------------------------------------------------------------
+    # Per-gene Pearson across cell lines
+    # ------------------------------------------------------------------
+    
+    # NEW: per-gene Pearson
+    all_pred_np = all_pred.numpy()
+    all_target_np = all_target.numpy()
+    
+    df_gene = pd.DataFrame({
+        "gene_id": gene_ids,
+        "pred": all_pred_np,
+        "true": all_target_np,
+    })
+    
+    gene_results = []
+    
+    for gene, g in df_gene.groupby("gene_id", sort=False):
+    
+        if len(g) < 10:
+            continue
+    
+        r = np.corrcoef(
+            g["pred"].values,
+            g["true"].values
+        )[0, 1]
+    
+        if np.isnan(r):
+            continue
+    
+        gene_results.append({
+            "gene_id": gene,
+            "n_cell_lines": len(g),
+            "pearson": r
+        })
+    
+    gene_results = pd.DataFrame(gene_results)
+    
+    pearson_pg = gene_results["pearson"].mean()
+    pearson_pg_sd = gene_results["pearson"].std(ddof=1)
+    n_genes = len(gene_results)
+    
+    gene_results.to_csv(
+        SAVE_PATH / f"gene_pearson_{SPLIT}.csv",
+        index=False
+    )
 
     print(f"\n{'=' * 55}")
     print(f"  MAE                : {mae:.4f}  (Chronos space)")
     print(f"  RMSE               : {rmse:.4f}  (Chronos space)")
     print(f"  Pearson (global)   : {pearson_full:.4f}  (Chronos space)")
     print(f"  Pearson (per-CL)   : {pearson_pcl:.4f} ± {pearson_pcl_sd:.4f}  (n={n_cl} cell lines)")
+    print(f"  Pearson (per-Gene) : {pearson_pg:.4f} ± {pearson_pg_sd:.4f}  (n={n_genes} genes)")
     print(f"{'=' * 55}\n")
 
     with open(OUT_METRICS, "w") as f:
@@ -187,16 +236,17 @@ def main():
             f"Bypass         : {'ablated' if ABLATE_BYPASS else 'active'}\n"
             f"N samples      : {len(all_pred):,}\n"
             f"N cell lines   : {n_cl}\n"
+            f"N genes        : {n_genes}\n"
             f"MAE            : {mae:.6f}  (Chronos space)\n"
             f"RMSE           : {rmse:.6f}  (Chronos space)\n"
             f"Pearson global : {pearson_full:.6f}  (Chronos space)\n"
             f"Pearson per-CL : {pearson_pcl:.6f} ± {pearson_pcl_sd:.6f}  (Chronos space)\n"
+            f"Pearson per-Gene : {pearson_pg:.6f} ± {pearson_pg_sd:.6f}\n"
         )
+    
     print(f"Metrics saved → {OUT_METRICS}")
 
     # ── Save predictions CSV ──────────────────────────────────────────────────
-    all_pred_np   = all_pred.numpy()
-    all_target_np = all_target.numpy()
     all_cl_np     = all_cl_idx.numpy()
     all_sample_np = all_sample_idx.numpy()
 
