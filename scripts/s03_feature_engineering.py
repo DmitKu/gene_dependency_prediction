@@ -20,6 +20,11 @@ from pathlib import Path
 import polars as pl
 import logging, sys
 import pickle
+from sklearn.preprocessing import QuantileTransformer
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import MinMaxScaler
+import joblib
+
 
 # Make src/ importable — works from CLI and Spyder
 try:
@@ -281,9 +286,15 @@ cluster_num_cols = [col for col in cluster_out.columns if col not in ['ModelID',
 
 cluster_out_pd = cluster_out.to_pandas()
 
+n_train_rows = (cluster_out_pd["split"] == "train").sum()
+n_q = min(n_train_rows, 50_000)
+print(f"  n_quantiles for gene features: {n_q} (train rows: {n_train_rows})")
+
+
+
 qt_cluster = ColumnTransformer(
     transformers=[('quantile', QuantileTransformer(
-        n_quantiles         = 50_000,
+        n_quantiles         = n_q,
         output_distribution = 'normal',
         subsample           = int(1e9),
         random_state        = 42,

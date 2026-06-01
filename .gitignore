@@ -1,6 +1,8 @@
-outputs/RNA_fetures/
 outputs/RNA_fetures/Cell_line_based_features.csv
 outputs/RNA_fetures/RNA_based_features_CRISPR.csv
+outputs/RNA_fetures/qt_cluster.pkl
+outputs/RNA_fetures/qt_gene_features.pkl
+outputs/RNA_fetures/qt_minmax.pkl
 outputs/H5_model_data/
 outputs/H5_model_data/model_H5_data.h5
 outputs/attention_audit
