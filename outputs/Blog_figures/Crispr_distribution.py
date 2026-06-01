@@ -14,12 +14,15 @@ import seaborn as sns
 
 
 base_path = r'C:\Users\dkuch\Documents\Blog_ideas_data\Computational\MOA_Prediction_based_on_CETSA\20251122_Model_development\GitHub_GeneDependancy_prediction'
-bath_path = Path(base_path)
+base_path = Path(base_path)
 
-file_path = r'C:\Users\dkuch\Documents\Blog_ideas_data\Computational\MOA_Prediction_based_on_CETSA\20251122_Model_development\GitHub_GeneDependancy_prediction/outputs/RNA_fetures/RNA_based_features_CRISPR.csv'
-file_path = Path(file_path)
+file_path = r'outputs/RNA_fetures/RNA_based_features_CRISPR.csv'
+
+save_file_path = r'outputs\Blog_figures\crispr_distribution.png'
+
+
 # Open the file in read mode
-with h5py.File(bath_path/'outputs/H5_model_data/model_H5_data.h5', 'r') as f:
+with h5py.File((base_path / file_path), 'r') as f:
     # List all groups/datasets in the root
     print("Keys in the file:", list(f.keys()))
     
@@ -49,48 +52,14 @@ plt.figure(figsize=(10, 6))
 sns.histplot(data=df_long, x='crispr_H5', kde=True, color='skyblue', edgecolor='white')
 
 # Aesthetics for the blog
-plt.title('Distribution of CRISPR Scores', fontsize=16, fontweight='bold')
+plt.title('Distribution of transformed CRISPR Scores', fontsize=16, fontweight='bold')
 plt.xlabel('CRISPR Score', fontsize=12)
 plt.ylabel('Frequency', fontsize=12)
 
 # Remove the top and right spines for a "clean" look
 sns.despine()
 
-plt.show()
-
-
-####compare with csv_file
-df_raw = pd.read_csv(file_path)
-df_raw.columns
-df_raw = df_raw[['ModelID', 'gene', 'CRISPR']]
-
-
-
-data_mrg = pd.merge(df_raw, df_long, on=['ModelID','gene'], how='inner')
-
-
-
-# Using your DataFrame
-df_sample = data_mrg.sample(n=10000, replace=True)
-df_sample.plot.scatter(x='CRISPR', y='crispr_H5')
-
-plt.show()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+plt.savefig(base_path / save_file_path, dpi=300, bbox_inches='tight')
 
 
 

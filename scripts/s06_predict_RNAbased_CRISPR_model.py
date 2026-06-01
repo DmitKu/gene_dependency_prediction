@@ -180,7 +180,7 @@ def main():
     # ------------------------------------------------------------------
     
     # NEW: per-gene Pearson
-    all_pred_np = all_pred.numpy()
+    all_pred_np   = qt.inverse_transform(all_pred.numpy().reshape(-1, 1)).squeeze()
     all_target_np = all_target.numpy()
     
     df_gene = pd.DataFrame({

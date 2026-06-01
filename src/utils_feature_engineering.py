@@ -273,7 +273,8 @@ def fit_quantile_transformer(
     )
     qt = QuantileTransformer(
         output_distribution = "normal",
-        n_quantiles         = min(1000, len(train_scores)),
+        n_quantiles         = 100_000,
+        subsample=int(1e9),
         random_state        = random_seed,
     )
     qt.fit(train_scores)

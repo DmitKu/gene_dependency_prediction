@@ -8,4 +8,4 @@ MAE            : 0.213697  (Chronos space)
 RMSE           : 0.311441  (Chronos space)
 Pearson global : 0.583472  (Chronos space)
 Pearson per-CL : 0.585615 ± 0.047610  (Chronos space)
-Pearson per-Gene : 0.038486 ± 0.117742
+Pearson per-Gene : 0.037483 ± 0.117889

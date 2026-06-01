@@ -450,27 +450,18 @@ def combined_loss(
     """
     Weighted combination of MSE, Pearson, and standard-deviation matching.
 
-    Loss = alpha * weighted_MSE  +  (1-alpha) * (1 - Pearson)  +  0.1 * |std_pred - std_target|
-
-    The MSE term up-weights extreme negative values (sensitive dependencies)
-    to counteract label imbalance:
-        weight = 1.0   (default)
-        weight = 2.0   if target < -0.7
-        weight = 4.0   if target < -1.5
+    Loss = alpha * MSE  +  (1-alpha) * (1 - Pearson)  +  0.1 * |std_pred - std_target|
 
     Returns
     -------
     loss      : scalar Tensor — total loss
-    mse_term  : scalar Tensor — weighted MSE component
+    mse_term  : scalar Tensor — MSE component
     pearson_r : scalar Tensor — Pearson correlation
     """
     pred_s   = pred.squeeze()
     target_s = target.squeeze()
 
-    weights = torch.ones_like(target_s)
-    weights[target_s < -0.7] = 2.0
-    weights[target_s < -1.5] = 4.0
-    mse_term = (weights * (pred_s - target_s) ** 2).mean()
+    mse_term = F.mse_loss(pred_s, target_s)
 
     pearson_r = differentiable_pearson(pred_s, target_s)
     std_loss  = (pred_s.std() - target_s.std()).abs()
