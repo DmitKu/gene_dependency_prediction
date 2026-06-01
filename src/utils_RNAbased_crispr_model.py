@@ -261,7 +261,7 @@ class CRISPRSensitivityModelV3(nn.Module):
     def __init__(
         self,
         cell_features_size: int   = 2388,
-        gene_features_size: int   = 27,
+        gene_features_size: int   = 26,
         hidden_dim:         int   = 128,
         n_attn_slots:       int   = 64,
         n_attn_heads:       int   = 4,

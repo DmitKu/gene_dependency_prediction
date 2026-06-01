@@ -1,9 +1,10 @@
+# -*- coding: utf-8 -*-
 """
-hdf5_builder.py
+utils_hdf5_builder.py
 ===============
-Library of functions for building model_data_v3.h5.
+Library of functions for building model_H5_data.h5.
 
-Called by run_build_hdf5.py — do not run directly.
+Called by s04_build_hdf5.py — do not run directly.
 """
 
 from __future__ import annotations
@@ -54,8 +55,8 @@ def identify_feature_columns(
 ) -> tuple[list[str], list[str]]:
     """Return the feature column names for each DataFrame.
 
-    Excludes metadata / identifier columns that should never be used as model
-    inputs.
+    Excludes metadata / identifier columns that should never be used as
+    model inputs.
     """
     cl_feat_cols = [
         c for c in df_cl.columns
@@ -63,7 +64,7 @@ def identify_feature_columns(
     ]
     gene_feat_cols = [
         c for c in df_gene.columns
-        if c not in ("ModelID", "gene", "CRISPR", "re-asigned", "split")
+        if c not in ("ModelID", "gene", "CRISPR", "cluster", "split")
     ]
 
     print(f"  Cell lines : {len(df_cl):>8,} rows  ×  {len(cl_feat_cols):>5} features")
@@ -129,75 +130,46 @@ def extract_split_indices(
     return train_idx, val_idx, test_idx, train_cls, val_cls, test_cls
 
 
-# ── Normalisation ─────────────────────────────────────────────────────────────
+# ── Feature extraction & validation ──────────────────────────────────────────
 
-def compute_normalization_stats(
+def load_and_validate_features(
     df_cl: pd.DataFrame,
     cl_feat_cols: list[str],
-    train_cls: set,
     df_gene: pd.DataFrame,
     gene_feat_cols: list[str],
-    train_mask: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Compute mean/std from *training* rows only.
-
-    Parameters
-    ----------
-    train_mask : np.ndarray of bool
-        Boolean mask over df_gene rows selecting the training partition.
-
-    Returns
-    -------
-    cl_mean, cl_std, gene_mean, gene_std : np.ndarray (float32)
-    """
-    print("Computing normalization statistics from training data …")
-
-    train_cl_mask  = df_cl["ModelID"].isin(train_cls).values
-    train_cl_arr   = df_cl.loc[train_cl_mask, cl_feat_cols].values.astype(np.float32)
-
-    cl_mean = np.nanmean(train_cl_arr, axis=0)
-    cl_std  = np.nanstd (train_cl_arr, axis=0)
-    cl_std[cl_std < 1e-6] = 1.0
-
-    train_gene_arr = df_gene.loc[train_mask, gene_feat_cols].values.astype(np.float32)
-
-    gene_mean = np.nanmean(train_gene_arr, axis=0)
-    gene_std  = np.nanstd (train_gene_arr, axis=0)
-    gene_std[gene_std < 1e-6] = 1.0
-
-    print(f"  Cell-line scaler fit on {train_cl_mask.sum()} cell lines.")
-    print(f"  Gene scaler fit on {train_mask.sum():,} gene rows.")
-
-    return cl_mean, cl_std, gene_mean, gene_std
-
-
-def normalize_and_impute(
-    df_cl: pd.DataFrame,
-    cl_feat_cols: list[str],
-    cl_mean: np.ndarray,
-    cl_std: np.ndarray,
-    df_gene: pd.DataFrame,
-    gene_feat_cols: list[str],
-    gene_mean: np.ndarray,
-    gene_std: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Z-score normalize features and impute any remaining NaNs with 0.
+    """Extract feature arrays and assert no NaNs remain.
+
+    Features are already fully normalized by s03_feature_engineering.py
+    (sign_log1p → QuantileTransformer → MinMaxScaler), so no further
+    scaling is applied here.
 
     Returns
     -------
     cl_feats, gene_feats : np.ndarray (float32)
     """
-    print("Normalizing …")
-    cl_feats   = (df_cl[cl_feat_cols].values.astype(np.float32)     - cl_mean)   / cl_std
-    gene_feats = (df_gene[gene_feat_cols].values.astype(np.float32) - gene_mean) / gene_std
+    print("Extracting feature arrays …")
+    cl_feats   = df_cl[cl_feat_cols].values.astype(np.float32)
+    gene_feats = df_gene[gene_feat_cols].values.astype(np.float32)
 
-    print("Imputing NaN values …")
-    cl_feats  [np.isnan(cl_feats)]   = 0.0
-    gene_feats[np.isnan(gene_feats)] = 0.0
+    # Sanity check — upstream pipeline should have removed all NaNs
+    nan_cl   = np.isnan(cl_feats).sum()
+    nan_gene = np.isnan(gene_feats).sum()
 
-    assert not np.isnan(cl_feats).any(),   "NaNs remain in cell-line features."
-    assert not np.isnan(gene_feats).any(), "NaNs remain in gene features."
-    print("  No NaNs remaining. ✓")
+    if nan_cl > 0:
+        raise ValueError(
+            f"{nan_cl} NaNs found in cell-line features. "
+            "Re-run s03_feature_engineering.py."
+        )
+    if nan_gene > 0:
+        raise ValueError(
+            f"{nan_gene} NaNs found in gene features. "
+            "Re-run s03_feature_engineering.py."
+        )
+
+    print("  No NaNs found in features. ✓")
+    print(f"  cl_feats   shape: {cl_feats.shape}")
+    print(f"  gene_feats shape: {gene_feats.shape}")
 
     return cl_feats, gene_feats
 
@@ -215,8 +187,6 @@ def prepare_crispr_target(
     Returns
     -------
     crispr_vals : np.ndarray (float32)
-        Full-length target array (NaNs are preserved in the array itself;
-        the split indices exclude them).
     train_idx, val_idx, test_idx : np.ndarray
         Possibly reduced indices after removing NaN CRISPR rows.
     """
@@ -230,6 +200,8 @@ def prepare_crispr_target(
         train_idx = train_idx[valid[train_idx]]
         val_idx   = val_idx  [valid[val_idx]]
         test_idx  = test_idx [valid[test_idx]]
+    else:
+        print("  No NaN CRISPR values. ✓")
 
     return crispr_vals, train_idx, val_idx, test_idx
 
@@ -245,10 +217,6 @@ def write_hdf5(
     df_gene: pd.DataFrame,
     cl_feat_cols: list[str],
     gene_feat_cols: list[str],
-    cl_mean: np.ndarray,
-    cl_std: np.ndarray,
-    gene_mean: np.ndarray,
-    gene_std: np.ndarray,
     train_idx: np.ndarray,
     val_idx: np.ndarray,
     test_idx: np.ndarray,
@@ -269,7 +237,7 @@ def write_hdf5(
         /genes/model_id               bytes   (n_gene,)
         /index/splits/train|val|test  int64   row indices into /genes/*
         /index/split_model_ids/…      bytes   ModelIDs per split
-        /normalization/…              scalars & feature name arrays
+        /metadata/feature_names/…     bytes   feature name arrays
 
     Global attrs record the CRISPR transform name and split strategy.
     """
@@ -311,19 +279,18 @@ def write_hdf5(
         grp_cl_ids.create_dataset("val",   data=np.array(sorted(val_cls),   dtype="S"))
         grp_cl_ids.create_dataset("test",  data=np.array(sorted(test_cls),  dtype="S"))
 
-        # Normalization statistics
-        grp_norm = f.create_group("normalization")
-        grp_norm.create_dataset("cl_mean",         data=cl_mean.astype(np.float32))
-        grp_norm.create_dataset("cl_std",          data=cl_std.astype(np.float32))
-        grp_norm.create_dataset("cl_feat_names",   data=np.array(cl_feat_cols,   dtype="S"))
-        grp_norm.create_dataset("gene_mean",       data=gene_mean.astype(np.float32))
-        grp_norm.create_dataset("gene_std",        data=gene_std.astype(np.float32))
-        grp_norm.create_dataset("gene_feat_names", data=np.array(gene_feat_cols, dtype="S"))
+        # Feature names (replaces normalization group)
+        grp_meta = f.create_group("metadata/feature_names")
+        grp_meta.create_dataset("cl_feat_names",
+                                data=np.array(cl_feat_cols,   dtype="S"))
+        grp_meta.create_dataset("gene_feat_names",
+                                data=np.array(gene_feat_cols, dtype="S"))
 
         # Global metadata
         f.attrs["crispr_transform"]        = "QuantileTransformer(output_distribution='normal')"
         f.attrs["crispr_transformer_path"] = "chronos_quantile_transformer.pkl"
         f.attrs["split_strategy"]          = "cell_line"
+        f.attrs["normalization"]           = "applied_in_s03_feature_engineering"
 
     print("  HDF5 written successfully. ✓")
 
@@ -362,7 +329,6 @@ def print_summary(
         f"  Gene rows  — train: {len(train_idx):>8,}  "
         f"val: {len(val_idx):>8,}  test: {len(test_idx):>8,}"
     )
-
     print("\nFeature dimensions:")
     print(f"  Cell-line features : {cl_feats.shape[1]}")
     print(f"  Gene features      : {gene_feats.shape[1]}")
@@ -373,7 +339,6 @@ def print_summary(
     print(f"  std   : {tr_crispr.std():.4f}   (expect ≈ 1.0)")
     print(f"  min   : {tr_crispr.min():.4f}")
     print(f"  max   : {tr_crispr.max():.4f}")
-
     print(
         "\nNOTE: CRISPR values are QuantileTransformed. To report metrics in\n"
         "  Chronos space, load chronos_quantile_transformer.pkl and call\n"
