@@ -48,7 +48,7 @@ def select_genes_by_variance(crispr_path: Path, min_sd: float = 0.01) -> list[st
 
 def load_cluster_info(cluster_csv: Path) -> pl.DataFrame:
     """Load gene → cluster mapping; keeps ['gene', 'cluster']."""
-    return pl.read_csv(cluster_csv).select(["gene", "cluster"])
+    return pl.read_csv(cluster_csv)#.select(["gene", "cluster"])
 
 
 def load_rna(rna_csv: Path,
@@ -492,7 +492,7 @@ def apply_log_transform(
 # Cluster-sum wide table
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_cluster_sum_wide(
+def build_cluster_mean_wide(
     rna_lng_valid: pl.DataFrame,
     split_map: pl.DataFrame,
 ) -> pl.DataFrame:
@@ -504,11 +504,11 @@ def build_cluster_sum_wide(
     rna_lng_valid : Long RNA table filtered to cell lines present in the final data.
     split_map     : DataFrame with ['ModelID', 'split'] for downstream reference.
     """
-    cluster_sum_wide = (
+    cluster_mean_wide = (
         rna_lng_valid
         .group_by(["ModelID", "cluster"])
-        .agg(pl.col("RNA").sum().alias("cluster_sum"))
+        .agg(pl.col("RNA").mean().alias("cluster_sum"))
         .pivot(on="cluster", index="ModelID", values="cluster_sum")
         .sort("ModelID")
     )
-    return cluster_sum_wide.join(split_map, on="ModelID", how="left")
+    return cluster_mean_wide.join(split_map, on="ModelID", how="left")

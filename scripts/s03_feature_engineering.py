@@ -38,7 +38,7 @@ from utils_feature_engineering import (
     load_cluster_info, load_rna, load_crispr,
     common_CellLine_alignment, sanity_check_data,
     # Cluster stats
-    melt_rna_with_clusters, compute_loo_cluster_stats, build_cluster_sum_wide,
+    melt_rna_with_clusters, compute_loo_cluster_stats, build_cluster_mean_wide,
     # Split
     split_cell_lines, add_split_column, print_split_stats,
     # Transforms
@@ -99,7 +99,7 @@ SKIP_LOG: set[str] = {
     "gene_fraction_of_cluster_total",
     "rank_value_glob",
     "is_highest_in_cluster",
-    "clust_N",
+    "clust_N"
 }
 
 
@@ -203,7 +203,8 @@ quantile_cols = [
     'clust_mean', 'clust_sd', 'clust_sum', 'clust_N',
     'clust_median', 'clust_max', 'clust_min',
     'gene_rank_in_clust','gene_vs_cluster_mean_ratio',
-    'z_score_glob','rank_value_glob','gene_fraction_of_cluster_total'
+    'z_score_glob','rank_value_glob','gene_fraction_of_cluster_total',
+    'UMAP1', 'UMAP2'
 ]
 
 
@@ -279,7 +280,7 @@ print("Melting RNA …")
 rna_wide_CL_melt = melt_rna_with_clusters(rna_wide_CL, cluster_info, selected_rna_genes)
 print(f"  RNA long shape: {rna_wide_CL.shape}")
 
-cluster_out = build_cluster_sum_wide(rna_wide_CL_melt, split_map_pl)
+cluster_out = build_cluster_mean_wide(rna_wide_CL_melt, split_map_pl)
 cluster_out = cluster_out.drop("null")
 
 cluster_num_cols = [col for col in cluster_out.columns if col not in ['ModelID', 'split']]

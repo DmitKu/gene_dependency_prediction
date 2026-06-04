@@ -1,0 +1,1 @@
+epoch,lr,train_loss,train_mse,train_pearson_batch,val_loss,val_mse,val_pearson_batch,mae_chronos,rmse_chronos,pearson_full,pearson_full_demeaned,cl_t_mean,cl_t_sd,time_sec

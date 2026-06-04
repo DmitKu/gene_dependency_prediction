@@ -53,12 +53,13 @@ BATCH_SIZE    = 20_000
 
 # Must match the architecture used during training
 MODEL_KWARGS = dict(
-    hidden_dim   = 128,
-    n_attn_slots = 64,
-    n_attn_heads = 4,
-    bypass_rank  = 32,
-    compress_dim = 512,
-    dropout      = 0.2,
+    hidden_dim    = 128,
+    gene_hidden   = 64,  
+    n_attn_slots  = 64,
+    n_attn_heads  = 4,
+    bypass_rank   = 8,    
+    compress_dim  = 1024,
+    dropout       = 0.2,
 )
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -106,13 +107,6 @@ def main():
     # ── Dataset & loader ──────────────────────────────────────────────────────
     ds = GeneDataset(H5_PATH, split=SPLIT)
 
-    # Load gene IDs directly from HDF5 using split indices (same pattern as
-    # utils_attention_audit.py) — GeneDataset does not expose gene_names
-    with h5py.File(H5_PATH, "r") as f:
-        all_gene_ids  = f["genes/gene_id"][:]
-        split_indices = f[f"index/splits/{SPLIT}"][:]
-        gene_ids      = [all_gene_ids[i].decode() for i in split_indices]
-
     loader = DataLoader(
         ds,
         batch_size         = BATCH_SIZE,
@@ -140,11 +134,13 @@ def main():
 
     # ── Inference ─────────────────────────────────────────────────────────────
     # GeneDataset.__getitem__ returns: gene_feat, cell_feat, target, cl_idx, sample_idx
+    # ── Inference ─────────────────────────────────────────────────────────────
     all_pred, all_target, all_cl_idx, all_sample_idx = [], [], [], []
+    all_gene_ids_list, all_model_ids_list = [], []
     t0 = time.time()
 
     with torch.no_grad():
-        for gene_feat, cell_feat, target, cl_idx, sample_idx in loader:
+        for gene_feat, cell_feat, target, cl_idx, gene_id, model_id, sample_idx in loader:
             gene_feat = gene_feat.to(DEVICE, non_blocking=True)
             cell_feat = cell_feat.to(DEVICE, non_blocking=True)
             with autocast(DEVICE):
@@ -153,6 +149,8 @@ def main():
             all_target.append(target.cpu())
             all_cl_idx.append(cl_idx.cpu())
             all_sample_idx.append(sample_idx.cpu())
+            all_gene_ids_list.extend(gene_id)
+            all_model_ids_list.extend(model_id)
 
     print(f"Inference done in {time.time() - t0:.1f}s")
 
@@ -161,117 +159,94 @@ def main():
     all_cl_idx     = torch.cat(all_cl_idx)
     all_sample_idx = torch.cat(all_sample_idx)
 
-    # ── Metrics (Chronos space) ───────────────────────────────────────────────
-    mae, rmse, pearson_full, pearson_pcl, pearson_pcl_sd = evaluate(
-        model, loader, DEVICE, qt=qt
+    # ── Inverse-transform both pred and target to Chronos space ──────────────
+    all_pred_np   = qt.inverse_transform(all_pred.numpy().reshape(-1, 1)).squeeze()
+    all_target_np = qt.inverse_transform(all_target.numpy().reshape(-1, 1)).squeeze()
+
+    # ── Summary metrics from evaluate() ──────────────────────────────────────
+    _, _, _, mae, rmse, pearson_full, pearson_pcl, pearson_pcl_sd = evaluate(
+        model, loader, DEVICE, qt=qt, alpha=0.1
     )
 
-    # Per-cell-line Pearson count (raw space, for n_cl reporting)
-    cl_pearsons_raw = []
-    for cl_id in all_cl_idx.unique():
-        mask = all_cl_idx == cl_id
-        if mask.sum() < 10:
-            continue
-        cl_pearsons_raw.append(pearson(all_pred[mask], all_target[mask]))
-    n_cl = len(cl_pearsons_raw)
-    
-    # ------------------------------------------------------------------
-    # Per-gene Pearson across cell lines
-    # ------------------------------------------------------------------
-    
-    # NEW: per-gene Pearson
-    all_pred_np   = qt.inverse_transform(all_pred.numpy().reshape(-1, 1)).squeeze()
-    all_target_np = all_target.numpy()
-    
+    # ── n_cl: count cell lines with enough samples, consistent with evaluate() ─
+    from collections import defaultdict
+    cl_groups = defaultdict(list)
+    for i, mid in enumerate(all_model_ids_list):
+        cl_groups[mid].append(i)
+    n_cl = sum(1 for indices in cl_groups.values() if len(indices) >= 10)
+
+    # ── Per-gene Pearson across cell lines ────────────────────────────────────
     df_gene = pd.DataFrame({
-        "gene_id": gene_ids,
-        "pred": all_pred_np,
-        "true": all_target_np,
+        "gene_id": all_gene_ids_list,   # ← fixed
+        "pred":    all_pred_np,
+        "true":    all_target_np,
     })
-    
+
     gene_results = []
-    
     for gene, g in df_gene.groupby("gene_id", sort=False):
-    
         if len(g) < 10:
             continue
-    
-        r = np.corrcoef(
-            g["pred"].values,
-            g["true"].values
-        )[0, 1]
-    
+        r = np.corrcoef(g["pred"].values, g["true"].values)[0, 1]
         if np.isnan(r):
             continue
-    
         gene_results.append({
-            "gene_id": gene,
+            "gene_id":      gene,
             "n_cell_lines": len(g),
-            "pearson": r
+            "pearson":      r,
         })
-    
-    gene_results = pd.DataFrame(gene_results)
-    
-    pearson_pg = gene_results["pearson"].mean()
-    pearson_pg_sd = gene_results["pearson"].std(ddof=1)
-    n_genes = len(gene_results)
-    
-    gene_results.to_csv(
-        SAVE_PATH / f"gene_pearson_{SPLIT}.csv",
-        index=False
-    )
 
+    gene_results  = pd.DataFrame(gene_results)
+    pearson_pg    = gene_results["pearson"].mean()
+    pearson_pg_sd = gene_results["pearson"].std(ddof=1)
+    n_genes       = len(gene_results)
+
+    gene_results.to_csv(SAVE_PATH / f"gene_pearson_{SPLIT}.csv", index=False)
+
+    # ── Print and save metrics ────────────────────────────────────────────────
     print(f"\n{'=' * 55}")
     print(f"  MAE                : {mae:.4f}  (Chronos space)")
     print(f"  RMSE               : {rmse:.4f}  (Chronos space)")
     print(f"  Pearson (global)   : {pearson_full:.4f}  (Chronos space)")
-    print(f"  Pearson (per-CL)   : {pearson_pcl:.4f} ± {pearson_pcl_sd:.4f}  (n={n_cl} cell lines)")
-    print(f"  Pearson (per-Gene) : {pearson_pg:.4f} ± {pearson_pg_sd:.4f}  (n={n_genes} genes)")
+    print(f"  Pearson (per-CL)   : {pearson_pcl:.4f} ± {pearson_pcl_sd:.4f}  (n={n_cl})")
+    print(f"  Pearson (per-Gene) : {pearson_pg:.4f} ± {pearson_pg_sd:.4f}  (n={n_genes})")
     print(f"{'=' * 55}\n")
 
     with open(OUT_METRICS, "w") as f:
         f.write(
-            f"Model          : {MODEL_PATH.name}\n"
-            f"Split          : {SPLIT}\n"
-            f"Bypass         : {'ablated' if ABLATE_BYPASS else 'active'}\n"
-            f"N samples      : {len(all_pred):,}\n"
-            f"N cell lines   : {n_cl}\n"
-            f"N genes        : {n_genes}\n"
-            f"MAE            : {mae:.6f}  (Chronos space)\n"
-            f"RMSE           : {rmse:.6f}  (Chronos space)\n"
-            f"Pearson global : {pearson_full:.6f}  (Chronos space)\n"
-            f"Pearson per-CL : {pearson_pcl:.6f} ± {pearson_pcl_sd:.6f}  (Chronos space)\n"
+            f"Model            : {MODEL_PATH.name}\n"
+            f"Split            : {SPLIT}\n"
+            f"Bypass           : {'ablated' if ABLATE_BYPASS else 'active'}\n"
+            f"N samples        : {len(all_pred):,}\n"
+            f"N cell lines     : {n_cl}\n"
+            f"N genes          : {n_genes}\n"
+            f"MAE              : {mae:.6f}  (Chronos space)\n"
+            f"RMSE             : {rmse:.6f}  (Chronos space)\n"
+            f"Pearson global   : {pearson_full:.6f}  (Chronos space)\n"
+            f"Pearson per-CL   : {pearson_pcl:.6f} ± {pearson_pcl_sd:.6f}\n"
             f"Pearson per-Gene : {pearson_pg:.6f} ± {pearson_pg_sd:.6f}\n"
         )
-    
     print(f"Metrics saved → {OUT_METRICS}")
 
     # ── Save predictions CSV ──────────────────────────────────────────────────
-    all_cl_np     = all_cl_idx.numpy()
     all_sample_np = all_sample_idx.numpy()
-
-    # Build integer index → cell-line model-ID lookup
-    cl_idx_to_model_id = {v: k for k, v in ds.cl_model_id_to_index.items()}
 
     with open(OUT_CSV, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["sample_idx", "cell_line_model_id", "gene_id",
                          "crispr_actual", "crispr_predicted", "residual"])
-
         for i in range(len(all_pred_np)):
             pred_val = float(all_pred_np[i])
             true_val = float(all_target_np[i])
             writer.writerow([
                 int(all_sample_np[i]),
-                cl_idx_to_model_id[int(all_cl_np[i])],
-                gene_ids[int(all_sample_np[i])],        # HDF5 positional index
+                all_model_ids_list[i],   # ← string directly, no integer lookup
+                all_gene_ids_list[i],    # ← fixed variable name
                 f"{true_val:.6f}",
                 f"{pred_val:.6f}",
                 f"{pred_val - true_val:.6f}",
             ])
 
     print(f"Predictions saved → {OUT_CSV}  ({len(all_pred_np):,} rows)")
-
 
 if __name__ == "__main__":
     main()

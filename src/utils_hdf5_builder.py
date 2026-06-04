@@ -64,7 +64,8 @@ def identify_feature_columns(
     ]
     gene_feat_cols = [
         c for c in df_gene.columns
-        if c not in ("ModelID", "gene", "CRISPR", "cluster", "split")
+        if c not in ("ModelID", "gene", "CRISPR", "split", "cluster",
+                     )
     ]
 
     print(f"  Cell lines : {len(df_cl):>8,} rows  ×  {len(cl_feat_cols):>5} features")
@@ -248,7 +249,7 @@ def write_hdf5(
         # Cell lines
         grp_cl = f.create_group("cell_lines")
         grp_cl.create_dataset("features",  data=cl_feats)
-        grp_cl.create_dataset("model_ids", data=df_cl["ModelID"].values.astype("S"))
+        grp_cl.create_dataset("model_id", data=df_cl["ModelID"].values.astype("S"))
 
         # Genes
         grp_g = f.create_group("genes")
@@ -264,8 +265,9 @@ def write_hdf5(
             chunks=(gene_chunk_rows,),
             compression="gzip", compression_opts=4,
         )
-        grp_g.create_dataset("gene_id",  data=df_gene["gene"].values.astype("S"))
+        grp_g.create_dataset("gene_id", data=df_gene["gene"].values.astype("S"))
         grp_g.create_dataset("model_id", data=df_gene["ModelID"].values.astype("S"))
+        grp_g.create_dataset("cluster_id", data=df_gene["cluster"].values.astype(int)) ###added
 
         # Split indices (gene-row level)
         grp_splits = f.create_group("index/splits")
@@ -274,7 +276,7 @@ def write_hdf5(
         grp_splits.create_dataset("test",  data=test_idx)
 
         # Split membership (cell-line level)
-        grp_cl_ids = f.create_group("index/split_model_ids")
+        grp_cl_ids = f.create_group("index/split_model_id")
         grp_cl_ids.create_dataset("train", data=np.array(sorted(train_cls), dtype="S"))
         grp_cl_ids.create_dataset("val",   data=np.array(sorted(val_cls),   dtype="S"))
         grp_cl_ids.create_dataset("test",  data=np.array(sorted(test_cls),  dtype="S"))
