@@ -1,4 +1,5 @@
 # BioAttention: Deep Learning for Gene Essentiality
+# [in progress]
 A biologically informed attention model leveraging manifold-guided RNA features to predict CRISPR dependency scores.
 
 ## Highlights:
