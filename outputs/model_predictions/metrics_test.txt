@@ -1,0 +1,12 @@
+Model                 : crispr_best_pearson_model.pt
+Split                 : test
+Bypass                : active
+N samples             : 784,881
+N cell lines (>=10)   : 111
+N genes    (>=10 CLs) : 7071
+MAE                   : 0.198188
+RMSE                  : 0.285011
+Pearson global        : 0.668601
+Pearson demeaned      : 0.668905
+Pearson per-CL mean   : 0.670936 ± 0.046689
+Pearson per-gene mean : 0.060897 ± 0.141299

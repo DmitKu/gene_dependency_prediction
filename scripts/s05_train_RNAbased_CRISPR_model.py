@@ -276,6 +276,7 @@ def main():
         raise FileNotFoundError(f"QuantileTransformer not found: {TRANSFORMER_PATH}")
 
     qt = joblib.load(TRANSFORMER_PATH)
+    qt = None
     print(f"QuantileTransformer loaded from {TRANSFORMER_PATH.name}")
     print("  → Evaluation metrics will be reported in Chronos space")
 

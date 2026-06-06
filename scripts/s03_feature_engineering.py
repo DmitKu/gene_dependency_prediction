@@ -175,10 +175,11 @@ print_split_stats(data, train_cls, val_cls, test_cls)
 
 
 # ── 7. QuantileTransform CRISPR — fit on train only ──────────────────────────
+###removed this step from analysis
 
-print("\nFitting QuantileTransformer on train CRISPR scores …")
-qt   = fit_quantile_transformer(data, RANDOM_SEED, OUT_TRANSFORMER)
-data = apply_quantile_transformer(data, qt)
+# print("\nFitting QuantileTransformer on train CRISPR scores …")
+# qt   = fit_quantile_transformer(data, RANDOM_SEED, OUT_TRANSFORMER)
+# data = apply_quantile_transformer(data, qt)
 
 
 # ── 8. Feature engineering ────────────────────────────────────────────────────
