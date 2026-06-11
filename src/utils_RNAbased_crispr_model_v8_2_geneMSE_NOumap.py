@@ -1,0 +1,852 @@
+# -*- coding: utf-8 -*-
+"""
+utils_RNAbased_crispr_model.py
+===============
+CRISPR Sensitivity Model v3 — Cross-Attention + Linear Bypass
+
+All dataset, model, loss, and evaluation components.
+Import this module from training scripts.
+
+Architecture summary
+--------------------
+  Gene features  →  gene_encoder  →  gene_res         →  gene_emb     [B, gene_hidden]
+  Cell features  →  cell_tokenizer                     →  cell_tokens  [B, n_slots, gene_hidden]
+
+  1st cross-attention  (query=gene_emb)                →  cell_context  [B, gene_hidden]
+  2nd cross-attention  (query=cell_context)            →  cell_context2 [B, gene_hidden]
+
+  cell_summary  = 0.5 * attn1_weighted + 0.5 * attn2_weighted
+  bypass_logit  = LinearBypass(gene_emb, cell_summary)
+
+  x        = merge(cat[cell_context2, gene_emb])   →  [B, hidden_dim]
+  gene_cond = cond_proj(gene_emb)                  →  [B, gene_hidden]
+
+  x = trunk_res1/2/3(x, cond=gene_cond)
+  output = head(x) + bypass_logit
+"""
+
+import time
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+from torch.amp import autocast
+from collections import defaultdict
+import h5py
+import numpy as np
+
+
+
+# ============================================================
+# Dataset
+# ============================================================
+
+class GeneDataset(Dataset):
+    """
+    Loads gene-level CRISPR sensitivity data from an HDF5 file.
+
+    Expected HDF5 layout
+    --------------------
+    index/splits/{train,val,test}  : 1-D integer index array
+    cell_lines/features            : float32 array [n_cell_lines, F]
+    cell_lines/model_id            : bytes array   [n_cell_lines]
+    genes/features                 : float32 array [n_genes, G]
+    genes/model_id                 : bytes array   [n_genes]
+    genes/gene_id                  : bytes array   [n_genes]
+    genes/crispr                   : float32 array [n_genes]
+
+    Returns (per __getitem__)
+    -------------------------
+    [0] gene_feat       : Tensor [G]
+    [1] cell_feat       : Tensor [F]
+    [2] crispr          : Tensor [1]
+    [3] cl_idx          : LongTensor scalar
+    [4] gene_id         : str
+    [5] model_id        : str
+    [6] idx             : int
+    [7] gene_var_weight : float32 scalar Tensor
+
+
+    Parameters
+    ----------
+    var_weight_floor : float
+        Minimum variance weight (before normalisation).  Default 0.05.
+    var_weight_cap : float
+        Maximum variance weight (before normalisation).  Default 8.0.
+        Prevents a handful of extreme outlier genes from dominating.
+    """
+
+    def __init__(
+        self,
+        h5_path: str,
+        split: str = "train",
+        var_weight_floor: float = 0.05,
+        var_weight_cap:   float = 8.0,
+    ):
+        assert split in ("train", "val", "test"), \
+            f"split must be 'train', 'val', or 'test', got '{split}'"
+        print(f"Loading {split} data ...")
+        t0 = time.time()
+
+        with h5py.File(h5_path, "r") as f:
+            gene_indices      = f[f"index/splits/{split}"][:]
+            self.cl_features  = torch.tensor(f["cell_lines/features"][:], dtype=torch.float32)
+            cl_model_ids      = f["cell_lines/model_id"][:]
+
+            all_gene_feat     = f["genes/features"][:]
+            all_model_ids     = f["genes/model_id"][:]
+            all_gene_ids      = f["genes/gene_id"][:]
+            all_crispr        = f["genes/crispr"][:]   # full array — needed for variance
+
+            self.gene_feat = torch.tensor(all_gene_feat[gene_indices], dtype=torch.float32)
+            self.crispr    = torch.tensor(all_crispr[gene_indices],    dtype=torch.float32)
+
+            self.gene_ids  = [all_gene_ids[i].decode()  for i in gene_indices]
+            self.model_ids = [all_model_ids[i].decode() for i in gene_indices]
+
+        # ── Cell-line lookup (morphological features) ────────────────────────
+        self.cl_model_id_to_index = {mid.decode(): i for i, mid in enumerate(cl_model_ids)}
+        self.cl_indices = torch.tensor(
+            [self.cl_model_id_to_index[mid] for mid in self.model_ids],
+            dtype=torch.long,
+        )
+        self.cl_index_to_model_id = {v: k for k, v in self.cl_model_id_to_index.items()}
+
+
+        # ── Variance-informed weights ────────────────────────────────────────
+        self.gene_var_weights = self._compute_gene_var_weights(
+            all_gene_ids   = all_gene_ids,
+            all_crispr     = all_crispr,
+            split_gene_ids = self.gene_ids,
+            floor          = var_weight_floor,
+            cap            = var_weight_cap,
+        )
+
+        # ── Duplicate check ──────────────────────────────────────────────────
+        pairs    = list(zip(self.gene_ids, self.model_ids))
+        n_unique = len(set(pairs))
+        if n_unique != len(pairs):
+            import warnings
+            warnings.warn(
+                f"Split '{split}': {len(pairs) - n_unique} duplicate "
+                f"(gene_id, model_id) pairs found — check data pipeline"
+            )
+        
+        # ── Integer gene index (for gene-demeaned loss) ──────────────────────────
+        unique_genes        = sorted(set(self.gene_ids))
+        self._gene_to_int   = {g: i for i, g in enumerate(unique_genes)}
+        self.gene_int_idx   = torch.tensor(
+            [self._gene_to_int[g] for g in self.gene_ids],
+            dtype=torch.long,
+        )
+
+        w = self.gene_var_weights
+        print(
+            f"  -> {len(self.gene_feat):,} samples | "
+            f"{len(set(self.gene_ids)):,} genes | "
+            f"{len(set(self.model_ids)):,} cell lines | "
+            f"loaded in {time.time() - t0:.2f}s\n"
+            f"  -> gene_var_weight  min={w.min():.3f}  "
+            f"mean={w.mean():.3f}  max={w.max():.3f}  "
+            f"(floor={var_weight_floor}  cap={var_weight_cap})\n"
+        )
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _compute_gene_var_weights(
+        all_gene_ids:   np.ndarray,
+        all_crispr:     np.ndarray,
+        split_gene_ids: list,
+        floor:          float,
+        cap:            float,
+    ) -> torch.Tensor:
+        """
+        Compute per-sample gene variance weights for this split.
+
+        1. Group all crispr scores by gene_id (full dataset).
+        2. Compute variance per gene (ddof=1).
+        3. Look up the variance for each sample in this split.
+        4. Clip to [floor, cap] then normalise so mean = 1.0.
+        """
+        gene_scores: dict = defaultdict(list)
+        for gid_bytes, score in zip(all_gene_ids, all_crispr):
+            gene_scores[gid_bytes.decode()].append(score)
+
+        gene_var: dict = {}
+        for gid, scores in gene_scores.items():
+            arr = np.array(scores, dtype=np.float32)
+            gene_var[gid] = float(arr.var(ddof=1)) if len(arr) > 1 else 0.0
+
+        raw = np.array(
+            [gene_var.get(gid, 0.0) for gid in split_gene_ids],
+            dtype=np.float32,
+        )
+
+        raw = np.clip(raw, floor, cap)
+        mean_w = raw.mean()
+        if mean_w > 1e-8:
+            raw = raw / mean_w
+
+        return torch.tensor(raw, dtype=torch.float32)
+
+    # ------------------------------------------------------------------
+    def __len__(self) -> int:
+        return len(self.gene_feat)
+
+    def __getitem__(self, idx):
+        cl_i = self.cl_indices[idx]
+        return (
+            self.gene_feat[idx],                   # [0] Tensor [G]
+            self.cl_features[cl_i],                # [1] Tensor [F]
+            self.crispr[idx].unsqueeze(0),         # [2] Tensor [1]
+            cl_i,                                  # [3] LongTensor scalar
+            self.gene_ids[idx],                    # [4] str
+            self.model_ids[idx],                   # [5] str
+            idx,                                   # [6] int
+            self.gene_var_weights[idx],            # [7] float32 scalar Tensor
+            self.gene_int_idx[idx],                # [8] LongTensor scalar — integer gene index
+        )
+
+
+
+# ============================================================
+# Building blocks
+# ============================================================
+
+class FiLMLayer(nn.Module):
+    """
+    Feature-wise Linear Modulation.
+    Applies per-feature affine transform gated by a conditioning vector.
+
+        out = (1 + gamma) * x + beta
+        where [gamma, beta] = Linear(cond)
+    """
+
+    def __init__(self, cond_dim: int, feature_dim: int):
+        super().__init__()
+        self.proj = nn.Linear(cond_dim, 2 * feature_dim)
+        nn.init.zeros_(self.proj.bias)
+        nn.init.normal_(self.proj.weight, 0, 0.01)
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        gamma, beta = self.proj(cond).chunk(2, dim=-1)
+        return (1 + gamma) * x + beta
+
+
+class GELUResidualBlock(nn.Module):
+    """
+    Pre-LayerNorm residual block (optionally FiLM-conditioned).
+
+    Pre-LN design
+    -------------
+    The LayerNorm is applied to the branch *input* before the linear
+    projection, not to the branch output. This lets the residual stream
+    carry large values across blocks (important for predicting extreme
+    CRISPR scores) while still stabilising gradient flow.
+
+        out = Linear(LayerNorm(x))       # branch
+        if FiLM: out = FiLM(out, cond)
+        return out + x                   # x is raw, no activation applied
+    """
+
+    def __init__(self, dim: int, dropout: float = 0.2, cond_dim: int = 0):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.net = nn.Sequential(
+            nn.Linear(dim, dim * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(dim * 2, dim),
+        )
+        self.film = FiLMLayer(cond_dim, dim) if cond_dim > 0 else None
+        # Removed self.act = nn.GELU() here
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor = None) -> torch.Tensor:
+        out = self.net(self.norm(x))
+        if self.film is not None and cond is not None:
+            out = self.film(out, cond)
+        
+        # FIX: Return pure addition to maintain the identity path
+        return out + x
+
+
+class RMSNorm(nn.Module):
+    """Root-Mean-Square Layer Normalization (no mean-centering)."""
+
+    def __init__(self, dim: int, eps: float = 1e-8):
+        super().__init__()
+        self.eps   = eps
+        self.scale = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        rms = x.pow(2).mean(-1, keepdim=True).sqrt()
+        return self.scale * x / (rms + self.eps)
+
+
+class CellTokenizer(nn.Module):
+    def __init__(
+        self,
+        cell_feat_dim: int,
+        n_slots:       int,
+        d_model:       int,
+        compress_dim:  int   = 1024,
+        gene_dim:      int   = 128,   
+        dropout:       float = 0.2,
+    ):
+        super().__init__()
+        self.n_slots = n_slots
+        self.d_model = d_model
+
+        self.compress = nn.Sequential(
+            nn.Linear(cell_feat_dim, compress_dim),
+            nn.LayerNorm(compress_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        # NEW: FiLM conditioning on gene_emb applied after compression
+        self.film = FiLMLayer(cond_dim=gene_dim, feature_dim=compress_dim)
+
+        self.tokenize   = nn.Linear(compress_dim, n_slots * d_model)
+        self.token_norm = RMSNorm(d_model)
+        self.slot_embed = nn.Parameter(torch.randn(1, n_slots, d_model) * 0.02)
+
+    def forward(self, x: torch.Tensor, gene_emb: torch.Tensor) -> torch.Tensor:  # gene_emb NEW
+        B = x.size(0)
+        z = self.compress(x)
+        z = self.film(z, gene_emb)          # gene steers which cell features matter
+        t = self.tokenize(z).reshape(B, self.n_slots, self.d_model)
+        return self.token_norm(t) + self.slot_embed
+
+
+class LinearBypass(nn.Module):
+    def __init__(self, gene_dim: int, cell_dim: int, rank: int = 32, reg_scale: float = 1e-3):
+        super().__init__()
+        self.gene_proj = nn.Linear(gene_dim, rank, bias=False)
+        self.cell_proj = nn.Linear(cell_dim, rank, bias=False)
+        self.scale     = nn.Parameter(torch.ones(1) * 0.5)
+        self.gate      = nn.Parameter(torch.tensor(-2.0))  # starts near-closed (sigmoid(-2) ≈ 0.12)
+        self.reg_scale = reg_scale
+        nn.init.normal_(self.gene_proj.weight, 0, 0.01)
+        nn.init.normal_(self.cell_proj.weight, 0, 0.01)
+
+    def forward(self, gene_emb, cell_summary):
+        g = F.normalize(self.gene_proj(gene_emb), dim=-1)
+        c = F.normalize(self.cell_proj(cell_summary), dim=-1)
+        raw = self.scale * (g * c).sum(-1, keepdim=True)
+        gate = torch.sigmoid(self.gate)
+        reg  = raw.pow(2).mean() * self.reg_scale
+        return gate * raw, reg
+
+# ============================================================
+# Main model
+# ============================================================
+
+class CRISPRSensitivityModelV3(nn.Module):
+    """
+    CRISPR sensitivity predictor — v3.
+
+    Parameters
+    ----------
+    cell_features_size : int    Input dimension of cell-line features.
+    gene_features_size : int    Input dimension of gene features.
+    hidden_dim         : int    Trunk hidden dimension (default 256).
+    n_attn_slots       : int    Number of cell tokens for cross-attention (default 64).
+    n_attn_heads       : int    Attention heads (default 4).
+    bypass_rank        : int    Rank of the bilinear bypass (default 32).
+    compress_dim       : int    Cell tokenizer compression dimension (default 1024).
+    dropout            : float  Default dropout rate (default 0.2).
+    """
+
+    def __init__(
+        self,
+        cell_features_size: int   = 2388,
+        gene_features_size: int   = 26,
+        hidden_dim:         int   = 128,
+        gene_hidden:        int   = 64,    
+        n_attn_slots:       int   = 64,
+        n_attn_heads:       int   = 4,
+        bypass_rank:        int   = 32,
+        compress_dim:       int   = 512,
+        dropout:            float = 0.2,
+    ):
+        super().__init__()
+
+
+        # ── ① Gene encoder ──────────────────────────────────────────────────
+        self.gene_encoder = nn.Sequential(
+            nn.Linear(gene_features_size, gene_hidden),
+            nn.LayerNorm(gene_hidden),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(gene_hidden, gene_hidden),
+            nn.LayerNorm(gene_hidden),
+            nn.GELU(),
+        )
+        self.gene_res = GELUResidualBlock(gene_hidden, dropout=0.1)
+
+        # ── ② Cell tokenizer ────────────────────────────────────────────────
+        self.cell_tokenizer = CellTokenizer(
+            cell_feat_dim = cell_features_size,
+            n_slots       = n_attn_slots,
+            d_model       = gene_hidden,
+            compress_dim  = compress_dim,
+            gene_dim      = gene_hidden,
+            dropout       = dropout,
+        )
+
+        # ── ③ First cross-attention ─────────────────────────────────────────
+        self.cross_attn  = nn.MultiheadAttention(
+            embed_dim=gene_hidden, num_heads=n_attn_heads,
+            dropout=dropout, batch_first=True,
+        )
+        self.attn_norm   = nn.LayerNorm(gene_hidden)
+
+        # ── ④ Second cross-attention ────────────────────────────────────────
+        self.cross_attn2 = nn.MultiheadAttention(
+            embed_dim=gene_hidden, num_heads=n_attn_heads,
+            dropout=dropout, batch_first=True,
+        )
+        self.attn_norm2  = nn.LayerNorm(gene_hidden)
+
+        # ── ⑤ Linear bypass ─────────────────────────────────────────────────
+        self.linear_bypass = LinearBypass(
+            gene_dim=gene_hidden, cell_dim=gene_hidden, rank=bypass_rank,
+        )
+
+        # ── ⑥ Trunk input projection ────────────────────────────────────────
+        self.merge = nn.Sequential(
+            nn.Linear(gene_hidden * 2, hidden_dim),  # ← gene_hidden*2 because we cat gene_emb
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+
+        # ── ⑦ Conditioning projection ───────────────────────────────────────
+        self.cond_proj = nn.Sequential(
+            nn.Linear(gene_hidden * 2, gene_hidden),  # ← concat gene + cell
+            nn.LayerNorm(gene_hidden),
+            nn.GELU(),
+        )
+        # ── ⑧ Trunk ─────────────────────────────────────────────────────────
+        self.trunk_res1 = GELUResidualBlock(hidden_dim, dropout=0.15, cond_dim=gene_hidden)  # ← was 0.25
+        self.trunk_res2 = GELUResidualBlock(hidden_dim, dropout=0.15, cond_dim=gene_hidden)  # ← was 0.25
+        self.trunk_res3 = GELUResidualBlock(hidden_dim, dropout=0.15, cond_dim=gene_hidden)  # ← was 0.25
+        
+
+        # ── ⑨ Head ──────────────────────────────────────────────────────────
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, 128),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(128, 64),
+            nn.GELU(),        # ← was ReLU (fixed separately)
+            nn.Dropout(0.1),
+            nn.Linear(64, 1),
+        )
+        
+        # scaling, importatnt strong but rear cases
+        self.out_scale = nn.Parameter(torch.ones(1) * 1.0)
+        self.out_shift = nn.Parameter(torch.zeros(1))
+
+        self._init_weights()
+    # ------------------------------------------------------------------
+    def forward(
+        self,
+        cell_features: torch.Tensor,   # [B, F]
+        gene_features: torch.Tensor,   # [B, G]
+        ablate_bypass: bool = False,
+    ) -> torch.Tensor:                 # [B, 1]
+
+        # ── ① Gene encoding ─────────────────────────────────────────────────
+        gene_emb = self.gene_res(self.gene_encoder(gene_features))
+
+        # ── ② Cell tokenization ─────────────────────────────────────────────
+        cell_tokens = self.cell_tokenizer(cell_features, gene_emb)
+
+        # ── ③ First cross-attention (query = gene_emb) ──────────────────────
+        attn_out1, attn_weights1 = self.cross_attn(
+            gene_emb.unsqueeze(1), cell_tokens, cell_tokens,
+            need_weights=True, average_attn_weights=True,
+        )
+        cell_context = self.attn_norm(attn_out1.squeeze(1) + gene_emb)
+
+        # ── ④ Second cross-attention (query = cell_context) ─────────────────
+        attn_out2, attn_weights2 = self.cross_attn2(
+            cell_context.unsqueeze(1), cell_tokens, cell_tokens,
+            need_weights=True, average_attn_weights=True,
+        )
+        cell_context2 = self.attn_norm2(attn_out2.squeeze(1) + cell_context)
+
+        # ── ⑤ Bypass ────────────────────────────────────────────────────────
+        cell_summary1 = (attn_weights1.squeeze(1).unsqueeze(-1) * cell_tokens).sum(dim=1)
+        cell_summary2 = (attn_weights2.squeeze(1).unsqueeze(-1) * cell_tokens).sum(dim=1)
+        cell_summary  = 0.5 * cell_summary1 + 0.5 * cell_summary2
+
+        bypass_logit, bypass_reg = self.linear_bypass(gene_emb, cell_summary)
+        if ablate_bypass:
+            bypass_logit = torch.zeros_like(bypass_logit)
+            bypass_reg   = torch.tensor(0.0, device=gene_emb.device)
+
+        # ── ⑥ Head & Trunk (Merged and Fixed) ───────────────────────────────
+        # gene_mean_pred: absorbs gene main effect explicitly
+        x_input = torch.cat([cell_context2, gene_emb], dim=-1)
+        x = self.merge(x_input)
+        gene_cond = self.cond_proj(torch.cat([gene_emb, cell_context2], dim=-1))
+        x = self.trunk_res1(x, cond=gene_cond)
+        x = self.trunk_res2(x, cond=gene_cond)
+        x = self.trunk_res3(x, cond=gene_cond)
+        trunk_pred = self.head(x)
+        raw = trunk_pred + bypass_logit
+        return raw * self.out_scale + self.out_shift, bypass_reg
+
+    # ------------------------------------------------------------------
+    def _init_weights(self):
+        bypass_ids = {
+            id(self.linear_bypass.gene_proj.weight),
+            id(self.linear_bypass.cell_proj.weight),
+        }
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if id(m.weight) in bypass_ids:
+                    continue
+                nn.init.kaiming_normal_(m.weight, nonlinearity="linear")
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
+
+# ============================================================
+# Loss functions
+# ============================================================
+
+def differentiable_pearson(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Raw Pearson — dominated by gene main effect."""
+    pred   = pred.view(-1)
+    target = target.view(-1)
+    pm = pred   - pred.mean()
+    pt = target - target.mean()
+    return (pm * pt).sum() / (pm.norm() * pt.norm() + 1e-8)
+
+
+def gene_demeaned_mse(
+    pred:     torch.Tensor,   # [B]
+    target:   torch.Tensor,   # [B]
+    gene_idx: torch.Tensor,   # [B] integer gene index
+    weights:  torch.Tensor = None,  # [B] optional, same weights as MSE term
+) -> torch.Tensor:
+    """
+    Per-gene-normalised MSE on within-gene residuals.
+
+    For each gene g, subtracts the per-gene target mean from both pred and
+    target (the demeaning cancels algebraically to pred - target, so this is
+    equivalent to global MSE numerically). The value is in the WEIGHTING:
+
+      - weights parameter lets you upweight high-variance genes differently
+        from the global MSE term
+      - gene-count normalisation gives equal gradient weight to a gene with
+        3 cell lines in the batch and a gene with 40 cell lines — without
+        this, large genes dominate and sparse genes get almost no signal
+
+    Only genes with >=2 cell lines in the batch contribute (need at least 2
+    observations to have any within-gene ranking signal).
+    """
+    pred     = pred.view(-1).float()
+    target   = target.view(-1).float()
+    gene_idx = gene_idx.view(-1)
+
+    n_genes = int(gene_idx.max().item()) + 1
+    counts  = torch.zeros(n_genes, device=pred.device, dtype=pred.dtype)
+    counts.scatter_add_(0, gene_idx, torch.ones_like(pred))
+    counts  = counts.clamp(min=1)
+
+    # Per-gene mean of TARGET only
+    t_sum  = torch.zeros(n_genes, device=target.device, dtype=target.dtype)
+    t_sum.scatter_add_(0, gene_idx, target)
+    t_mean = (t_sum / counts)[gene_idx]   # [B]
+
+    pred_dm   = pred   - t_mean
+    target_dm = target - t_mean
+    residuals = (pred_dm - target_dm).pow(2)   # algebraically == (pred - target)^2
+
+    if weights is not None:
+        w         = weights.view(-1).to(pred.device, dtype=pred.dtype)
+        w         = w / (w.mean() + 1e-8)
+        residuals = w * residuals
+
+    # Average MSE per gene, then average across genes
+    # Gives equal gradient weight regardless of how many cell lines
+    # appear for each gene in this batch
+    gene_mse = torch.zeros(n_genes, device=pred.device, dtype=pred.dtype)
+    gene_mse.scatter_add_(0, gene_idx, residuals)
+    gene_mse = gene_mse / counts
+
+    # Only genes with >=2 cell lines contribute any within-gene signal
+    present = (counts > 1)
+    return gene_mse[present].mean()
+
+
+
+def combined_loss(
+    pred:            torch.Tensor,
+    target:          torch.Tensor,
+    cl_idx:          torch.Tensor,
+    gene_idx:        torch.Tensor,
+    alpha:           float             = 0.5,
+    beta:            float             = 0.25,
+    gene_var_weight: torch.Tensor = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Combined MSE + Pearson + demeaned-Pearson loss.
+
+    gene_var_weight : Tensor [B], optional
+        Per-sample biological variance weight from GeneDataset (position 7
+        of the batch tuple).  Multiplied with the deviation-based weight:
+
+            final_weight = deviation_weight * gene_var_weight
+
+        Both are renormalised together so loss magnitude stays stable.
+        Pass None to disable (falls back to original deviation-only weighting).
+    """
+    pred_s   = pred.view(-1)
+    target_s = target.view(-1)
+
+    with torch.no_grad():
+        target_mean = target_s.mean()
+        deviation   = (target_s - target_mean).abs()
+        deviation_w = 1.0 + 2.0 * (deviation / (deviation.max() + 1e-8))
+
+        if gene_var_weight is not None:
+            gvw     = gene_var_weight.view(-1).to(pred_s.device, dtype=pred_s.dtype)
+            weights = deviation_w * gvw
+        else:
+            weights = deviation_w
+
+        weights = weights / (weights.mean() + 1e-8)
+
+    mse_term         = (weights * (pred_s - target_s) ** 2).mean()
+
+    pearson_r        = differentiable_pearson(pred_s, target_s)
+    gdm_mse = gene_demeaned_mse(pred_s, target_s, gene_idx, weights=weights)
+
+    loss = (
+        alpha                * mse_term
+        + (1 - alpha - beta) * (1 - pearson_r)
+        + beta               * gdm_mse
+    )
+    return loss, mse_term, pearson_r, gdm_mse
+
+# ============================================================
+# Evaluation
+# ============================================================
+
+def evaluate(
+    model:         nn.Module,
+    loader,
+    device:        str,
+    qt=None,
+    alpha:         float = 0.5,
+    ablate_bypass: bool  = False,
+) -> tuple[float, float, float, float, float, float, float, float, float]:
+    """
+    High-performance evaluation using GPU-native vectorization.
+
+    Unpacks position 7 (gene_var_weight)
+    from the batch tuple.
+    """
+    model.eval()
+    all_pred, all_target, all_cl_idx, all_gene_int_idx = [], [], [], []
+    total_loss = total_mse = total_pearson = 0.0
+
+    device_type = torch.device(device).type
+
+
+    with torch.no_grad():
+        for gene_feat, cell_feat, target, cl_idx, _, _, _, gene_var_w, gene_int_idx in loader:
+            gene_feat   = gene_feat.to(device, non_blocking=True)
+            cell_feat   = cell_feat.to(device, non_blocking=True)
+            target_d    = target.to(device, non_blocking=True)
+            cl_idx      = cl_idx.to(device, non_blocking=True)
+            gene_var_w  = gene_var_w.to(device, non_blocking=True)
+            gene_int_idx = gene_int_idx.to(device, non_blocking=True)
+
+            with autocast(device_type=device_type):
+                pred, _ = model(cell_feat, gene_feat,
+                                ablate_bypass=ablate_bypass)
+                loss, mse_term, pearson_r, _ = combined_loss(
+                    pred,
+                    target_d,
+                    cl_idx,
+                    gene_idx=gene_int_idx,
+                    alpha=alpha,
+                    gene_var_weight=gene_var_w,
+                )
+
+            all_pred.append(pred.view(-1))
+            all_target.append(target_d.view(-1))
+            all_cl_idx.append(cl_idx.view(-1))
+            all_gene_int_idx.append(gene_int_idx.view(-1))
+
+            total_loss    += loss.item()
+            total_mse     += mse_term.item()
+            total_pearson += pearson_r.item()
+
+    n = len(loader)
+    val_loss    = total_loss    / n
+    val_mse     = total_mse     / n
+    val_pearson = total_pearson / n
+
+    eval_pred   = torch.cat(all_pred)
+    eval_target = torch.cat(all_target)
+    cl_idx      = torch.cat(all_cl_idx)
+    gene_int_idx = torch.cat(all_gene_int_idx)
+
+    if qt is not None:
+        pred_np   = qt.inverse_transform(eval_pred.cpu().numpy().reshape(-1, 1)).squeeze()
+        target_np = qt.inverse_transform(eval_target.cpu().numpy().reshape(-1, 1)).squeeze()
+        eval_pred   = torch.tensor(pred_np,   device=device, dtype=torch.float32)
+        eval_target = torch.tensor(target_np, device=device, dtype=torch.float32)
+
+    mae  = (eval_pred - eval_target).abs().mean().item()
+    rmse = ((eval_pred - eval_target) ** 2).mean().sqrt().item()
+
+    pm = eval_pred   - eval_pred.mean()
+    pt = eval_target - eval_target.mean()
+    pearson_full = ((pm * pt).sum() / (pm.norm() * pt.norm() + 1e-8)).item()
+
+    n_cl   = cl_idx.max() + 1
+    counts = torch.zeros(n_cl, device=device).scatter_add_(
+        0, cl_idx, torch.ones_like(eval_pred)
+    ).clamp(min=1)
+
+
+
+    # Gene-demeaned Pearson — demean by gene (not cell line)
+    # This matches what the training loss optimises
+    n_genes  = gene_int_idx.max() + 1      # gene_int_idx unpacked from batch pos [9]
+    g_counts = torch.zeros(n_genes, device=device).scatter_add_(
+        0, gene_int_idx, torch.ones_like(eval_pred)
+    ).clamp(min=1)
+    t_gsums  = torch.zeros(n_genes, device=device).scatter_add_(
+        0, gene_int_idx, eval_target
+    )
+    t_gmeans = (t_gsums / g_counts)[gene_int_idx]
+    
+    pred_gdm   = eval_pred   - t_gmeans    # pred relative to per-gene target mean
+    target_gdm = eval_target - t_gmeans    # target centered per gene
+    
+    # NO second global mean subtraction — that was the bug
+    pm_gd = pred_gdm
+    pt_gd = target_gdm
+    pearson_full_demeaned = (
+        (pm_gd * pt_gd).sum() / (pm_gd.norm() * pt_gd.norm() + 1e-8)
+    ).item()
+
+    mask         = counts >= 10
+    valid_cl_ids = torch.nonzero(mask).view(-1)
+
+    cl_pearsons = []
+    if valid_cl_ids.numel() > 0:
+        for cid in valid_cl_ids:
+            cl_mask = (cl_idx == cid)
+            p_cl    = eval_pred[cl_mask]
+            t_cl    = eval_target[cl_mask]
+            pm_cl   = p_cl - p_cl.mean()
+            pt_cl   = t_cl - t_cl.mean()
+            denom   = pm_cl.norm() * pt_cl.norm()
+            if denom > 1e-8:
+                cl_pearsons.append((pm_cl * pt_cl).sum() / denom)
+
+    if cl_pearsons:
+        cl_t    = torch.stack(cl_pearsons)
+        cl_mean = cl_t.mean().item()
+        cl_std  = cl_t.std().item() if cl_t.numel() > 1 else 0.0
+    else:
+        cl_mean, cl_std = 0.0, 0.0
+
+    return (
+        val_loss, val_mse, val_pearson,
+        mae, rmse,
+        pearson_full,
+        pearson_full_demeaned,
+        cl_mean, cl_std,
+    )
+
+
+# ============================================================
+# Diagnostics
+# ============================================================
+
+def diagnose_bypass(
+    model:     nn.Module,
+    loader,
+    device:    str,
+    n_batches: int = 5,
+) -> None:
+    """
+    Print bypass vs trunk head contribution.
+
+    Healthy model: bypass/head ratio < 1.0, attn entropy > 2.0
+    Collapse risk: bypass/head ratio > 2.0, attn entropy < 0.5
+
+    Also prints the learned UMAP gate value for monitoring.
+    """
+    model.eval()
+    bypass_mags, head_mags, attn_entropies = [], [], []
+
+    with torch.no_grad():
+        for i, (gene_feat, cell_feat, target, cl_idx, gene_id, model_id, _, _, gene_int_idx) in enumerate(loader):
+            if i >= n_batches:
+                break
+            gene_feat   = gene_feat.to(device)
+            cell_feat   = cell_feat.to(device)
+
+            gene_emb    = model.gene_res(model.gene_encoder(gene_feat))
+            cell_tokens = model.cell_tokenizer(cell_feat, gene_emb)
+
+            attn_out1, weights1 = model.cross_attn(
+                gene_emb.unsqueeze(1), cell_tokens, cell_tokens,
+                need_weights=True, average_attn_weights=True,
+            )
+            cell_context = model.attn_norm(attn_out1.squeeze(1) + gene_emb)
+
+            attn_out2, weights2 = model.cross_attn2(
+                cell_context.unsqueeze(1), cell_tokens, cell_tokens,
+                need_weights=True, average_attn_weights=True,
+            )
+            cell_context2 = model.attn_norm2(attn_out2.squeeze(1) + cell_context)
+
+            cell_summary1 = (weights1.squeeze(1).unsqueeze(-1) * cell_tokens).sum(dim=1)
+            cell_summary2 = (weights2.squeeze(1).unsqueeze(-1) * cell_tokens).sum(dim=1)
+            cell_summary  = 0.5 * cell_summary1 + 0.5 * cell_summary2
+
+            bypass, _ = model.linear_bypass(gene_emb, cell_summary)
+
+            x         = model.merge(torch.cat([cell_context2, gene_emb], dim=-1))
+            gene_cond = model.cond_proj(torch.cat([gene_emb, cell_context2], dim=-1))
+            x         = model.trunk_res1(x, cond=gene_cond)
+            x         = model.trunk_res2(x, cond=gene_cond)
+            x         = model.trunk_res3(x, cond=gene_cond)
+            head_out  = model.head(x)
+
+            bypass_mags.append((bypass   * model.out_scale).abs().mean().item())
+            head_mags.append(  (head_out * model.out_scale).abs().mean().item())
+
+            w1      = weights1.squeeze(1)
+            entropy = -(w1 * (w1 + 1e-8).log()).sum(-1).mean()
+            attn_entropies.append(entropy.item())
+
+    bypass_mean  = sum(bypass_mags)    / len(bypass_mags)
+    head_mean    = sum(head_mags)      / len(head_mags)
+    entropy_mean = sum(attn_entropies) / len(attn_entropies)
+    ratio        = bypass_mean / (head_mean + 1e-8)
+
+
+    print(f"\n-- Bypass Diagnostic -------------------------------------------")
+    print(f"  Bypass magnitude  : {bypass_mean:.4f}")
+    print(f"  Head magnitude    : {head_mean:.4f}")
+    print(f"  Bypass/Head ratio : {ratio:.3f}  (healthy: <1.0  collapse: >2.0)")
+    print(f"  Attn entropy      : {entropy_mean:.4f}  (healthy: >2.0  collapsed: <0.5)")
+    print(f"----------------------------------------------------------------\n")
+    

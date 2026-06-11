@@ -536,12 +536,17 @@ def train_and_apply_umap(full_df,
     - min_dist: How tightly points are packed together.
     - n_components: Dimensions of the resulting embedding.
     """
+    
+    # scaler = StandardScaler()
+    # train_data_scaled = scaler.fit_transform(full_df.loc[full_df['split']=='train', feature_cols])
+    
     # 1. Initialize the UMAP reducer
     reducer_CL = umap.UMAP(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
         n_components=n_components,
-        random_state=42
+        random_state=42,
+        metric = 'correlation'
     )    
 
     # List comprehension: iterates through columns and keeps those not in the exclude list
@@ -578,7 +583,7 @@ def plot_CL_umap(X_umap, meta_df,
         y='umap_2', 
         color=color_col,
         hover_name='OncotreePrimaryDisease',
-        title="2 dUMAP – Cell Lines [color - primary cancer, only for visualization]",
+        title=f"2 dUMAP – Cell Lines [color - {color_col}, only for visualization]",
         labels={"umap_1": "UMAP1", "umap_2": "UMAP2"} 
     )
     

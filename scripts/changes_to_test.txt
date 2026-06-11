@@ -1,0 +1,18 @@
+utils_RNAbased_crispr_model_v8_geneMSE_NOumap.py
+Step	Change	Why first
+0       baseline (end_alpha: 0.2, beta: 0.4, bypass_rank: 8, var_weight_cap: 8.0, out_scale clamp floor: 0.5  )
+1	end_alpha: 0.2 → 0.35	Biggest lever on scale compression, touches the dominant loss term
+2	beta: 0.4 → 0.55	Only if step 1 alone is insufficient; directly reduces ranking-only pressure
+3	bypass_rank: 8 → 32	Only if scale is still compressed after loss rebalancing
+4	var_weight_cap: 8.0 → 12.0	Fine-tuning for extreme outlier genes specifically
+5	out_scale clamp floor: 0.5 → 0.8	Last resort, most indirect
+6       multitask model Q10 threshhold
+
+
+Step 1: end_alpha 0.2 → 0.35          (1 training run)
+        ↓ if compression persists
+Step 2: beta 0.4 → 0.25               (1 training run)
+        ↓ if compression persists
+Step 3: bypass_rank 8 → 32            (1 training run)
+        ↓ compression is resolved OR mostly resolved
+Step 4: introduce multi-task          (architecture change)
